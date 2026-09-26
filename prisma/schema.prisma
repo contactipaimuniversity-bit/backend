@@ -1,0 +1,295 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- ENUMS ----------
+
+enum StatutRelance {
+  A_RELANCER
+  RELANCE
+  CONVERTI
+  ABANDONNE
+}
+
+enum NiveauDemande {
+  PREMIERE_ANNEE
+  DEUXIEME_ANNEE
+}
+
+enum StatutDemandeBourse {
+  EN_ATTENTE
+  ENTRETIEN_PROGRAMME
+  EN_DELIBERATION
+  ACCEPTEE
+  REFUSEE
+}
+
+enum StatutInscription {
+  EN_COURS
+  COMPLETE
+  ABANDONNEE
+}
+
+enum CategorieElement {
+  DOCUMENT
+  FOURNITURE
+  FRAIS
+}
+
+enum ContexteElement {
+  BOURSE
+  INSCRIPTION_DIRECTE
+  TOUS
+}
+
+enum NiveauApplicable {
+  PREMIERE_ANNEE
+  DEUXIEME_ANNEE_PLUS
+  TOUS
+}
+
+enum StatutElementDossier {
+  ATTENDU
+  FOURNI
+  MANQUANT
+  SUBSTITUE
+}
+
+enum TypePaiement {
+  FRAIS_DEPOT
+  FRAIS_INSCRIPTION
+  ECHEANCE_BOURSE
+}
+
+enum StatutCandidaturePersonnel {
+  DEPOSE
+  ENTRETIEN_PROGRAMME
+  ENTRETIEN_REALISE
+  RETENU
+  REFUSE
+}
+
+enum StatutElementPersonnel {
+  ATTENDU
+  FOURNI
+  MANQUANT
+}
+
+// ---------- MODELES ----------
+
+model Utilisateur {
+  id         String @id @default(uuid())
+  nom        String
+  email      String @unique
+  motDePasse String
+  role       String
+
+  personnesCreees Personne[]
+
+  @@map("utilisateurs")
+}
+
+model Personne {
+  id                 String       @id @default(uuid())
+  nom                String
+  prenom             String
+  telephone          String?
+  quartier           String?
+  dateNaissance      DateTime?
+  lieuNaissance      String?
+  tuteurNom          String?
+  tuteurPrenom       String?
+  tuteurTelephone    String?
+  dateEnregistrement DateTime     @default(now())
+  creeParId          String?
+  creePar            Utilisateur? @relation(fields: [creeParId], references: [id])
+
+  prospect       Prospect?
+  demandesBourse DemandeBourse[]
+  inscriptions   Inscription[]
+
+  @@map("personnes")
+}
+
+model Prospect {
+  id               String        @id @default(uuid())
+  personneId       String        @unique
+  personne         Personne      @relation(fields: [personneId], references: [id])
+  filiereSouhaitee String?
+  intention        String?
+  statutRelance    StatutRelance @default(A_RELANCER)
+
+  themes ThemeDiscussion[]
+
+  @@map("prospects")
+}
+
+model ThemeDiscussion {
+  id         String   @id @default(uuid())
+  prospectId String
+  prospect   Prospect @relation(fields: [prospectId], references: [id])
+  theme      String
+  date       DateTime @default(now())
+
+  @@map("themes_discussion")
+}
+
+model TypeBourse {
+  id               String   @id @default(uuid())
+  nom              String   @unique
+  fraisInscription Decimal  @db.Decimal(10, 2)
+  tauxReduction    Decimal? @db.Decimal(5, 2)
+
+  echeances      EcheanceBourse[]
+  demandesBourse DemandeBourse[]
+
+  @@map("types_bourse")
+}
+
+model EcheanceBourse {
+  id             String     @id @default(uuid())
+  typeBourseId   String
+  typeBourse     TypeBourse @relation(fields: [typeBourseId], references: [id])
+  libelle        String
+  ordre          Int
+  dateEcheance   DateTime?
+  montantAttendu Decimal?   @db.Decimal(10, 2)
+
+  paiements Paiement[]
+
+  @@unique([typeBourseId, ordre])
+  @@map("echeances_bourse")
+}
+
+model DemandeBourse {
+  id                         String              @id @default(uuid())
+  personneId                 String
+  personne                   Personne            @relation(fields: [personneId], references: [id])
+  niveauDemande              NiveauDemande
+  filiereSouhaitee           String
+  filiereSecondaireSouhaitee String?
+  ecoleOrigine               String?
+  dateDepot                  DateTime            @default(now())
+  dateEntretien              DateTime?
+  equipeEntretien            String?
+  dateDecision               DateTime?
+  typeBourseId               String?
+  typeBourse                 TypeBourse?         @relation(fields: [typeBourseId], references: [id])
+  statut                     StatutDemandeBourse @default(EN_ATTENTE)
+
+  inscriptions    Inscription[]
+  elementsDossier ElementDossier[]
+  paiements       Paiement[]
+
+  @@map("demandes_bourse")
+}
+
+model Inscription {
+  id              String            @id @default(uuid())
+  personneId      String
+  personne        Personne          @relation(fields: [personneId], references: [id])
+  anneeScolaire   String
+  niveau          String
+  filiere         String
+  viaBourse       Boolean           @default(false)
+  demandeBourseId String?
+  demandeBourse   DemandeBourse?    @relation(fields: [demandeBourseId], references: [id])
+  dateInscription DateTime          @default(now())
+  statut          StatutInscription @default(EN_COURS)
+
+  elementsDossier ElementDossier[]
+  paiements       Paiement[]
+
+  @@map("inscriptions")
+}
+
+model ElementRequis {
+  id                 String           @id @default(uuid())
+  nom                String
+  categorie          CategorieElement
+  contexte           ContexteElement
+  niveauApplicable   NiveauApplicable
+  obligatoire        Boolean          @default(true)
+  montantAttendu    Decimal?         @db.Decimal(10, 2)
+  elementSubstitutId String?
+  elementSubstitut   ElementRequis?   @relation("SubstitutionCatalogue", fields: [elementSubstitutId], references: [id])
+  substituePour      ElementRequis[]  @relation("SubstitutionCatalogue")
+
+  elementsDossier           ElementDossier[] @relation("ElementAttendu")
+  utiliseCommeSubstitutDans ElementDossier[] @relation("SubstitutUtiliseDansDossier")
+
+  @@map("elements_requis")
+}
+
+model ElementDossier {
+  id                        String               @id @default(uuid())
+  demandeBourseId           String?
+  demandeBourse             DemandeBourse?       @relation(fields: [demandeBourseId], references: [id])
+  inscriptionId             String?
+  inscription               Inscription?         @relation(fields: [inscriptionId], references: [id])
+  elementRequisId           String
+  elementRequis             ElementRequis        @relation("ElementAttendu", fields: [elementRequisId], references: [id])
+  statut                    StatutElementDossier @default(ATTENDU)
+  montantAttendu            Decimal?             @db.Decimal(10, 2)
+  dateFourniture            DateTime?
+  elementSubstitutUtiliseId String?
+  elementSubstitutUtilise   ElementRequis?       @relation("SubstitutUtiliseDansDossier", fields: [elementSubstitutUtiliseId], references: [id])
+  paiements                 Paiement[]
+
+  @@unique([demandeBourseId, elementRequisId])
+  @@unique([inscriptionId, elementRequisId])
+  @@map("elements_dossier")
+}
+
+model Paiement {
+  id              String          @id @default(uuid())
+  demandeBourseId String?
+  demandeBourse   DemandeBourse?  @relation(fields: [demandeBourseId], references: [id])
+  inscriptionId   String?
+  inscription     Inscription?    @relation(fields: [inscriptionId], references: [id])
+  echeanceId      String?
+  echeance        EcheanceBourse? @relation(fields: [echeanceId], references: [id])
+  elementDossierId String?
+  elementDossier   ElementDossier? @relation(fields: [elementDossierId], references: [id])
+  montant         Decimal         @db.Decimal(10, 2)
+  datePaiement    DateTime        @default(now())
+  typePaiement    TypePaiement
+
+  @@map("paiements")
+}
+
+model CandidaturePersonnel {
+  id               String                    @id @default(uuid())
+  nom              String
+  prenom           String
+  dateNaissance    DateTime?
+  diplome          String
+  fonction         String
+  quartier         String?
+  statut           StatutCandidaturePersonnel @default(DEPOSE)
+  dateEntretien    DateTime?
+  equipeEntretien  String?
+  remarques        String?
+  dateDepot        DateTime                  @default(now())
+
+  elementsDossier ElementPersonnel[]
+
+  @@map("candidatures_personnel")
+}
+
+model ElementPersonnel {
+  id                    String                    @id @default(uuid())
+  candidaturePersonnelId String
+  candidaturePersonnel  CandidaturePersonnel     @relation(fields: [candidaturePersonnelId], references: [id], onDelete: Cascade)
+  nom                   String
+  obligatoire            Boolean                   @default(true)
+  statut                StatutElementPersonnel    @default(ATTENDU)
+  dateFourniture        DateTime?
+
+  @@map("elements_personnel")
+}
