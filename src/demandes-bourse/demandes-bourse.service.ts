@@ -18,12 +18,7 @@ const STATUTS_DEMANDE = [
   'ACCEPTEE',
   'REFUSEE',
 ] as const;
-const STATUTS_ELEMENT = [
-  'ATTENDU',
-  'FOURNI',
-  'MANQUANT',
-  'SUBSTITUE',
-] as const;
+const STATUTS_ELEMENT = ['ATTENDU', 'FOURNI', 'MANQUANT', 'SUBSTITUE'] as const;
 
 type NiveauValue = (typeof NIVEAUX)[number];
 type StatutDemandeValue = (typeof STATUTS_DEMANDE)[number];
@@ -98,11 +93,7 @@ export class DemandesBourseService {
     } = {};
 
     if (search.statut) {
-      where.statut = this.parseValue(
-        search.statut,
-        STATUTS_DEMANDE,
-        'statut',
-      );
+      where.statut = this.parseValue(search.statut, STATUTS_DEMANDE, 'statut');
     }
     if (search.niveauDemande) {
       where.niveauDemande = this.parseValue(
@@ -154,7 +145,9 @@ export class DemandesBourseService {
   ): number {
     const parsed = Number(value ?? fallback);
     if (!Number.isInteger(parsed) || parsed < 1) {
-      throw new BadRequestException('Les paramètres de pagination sont invalides');
+      throw new BadRequestException(
+        'Les paramètres de pagination sont invalides',
+      );
     }
     return Math.min(parsed, maximum);
   }
@@ -174,8 +167,10 @@ export class DemandesBourseService {
 
   async updateEntretien(id: string, updateDto: UpdateEntretienDto) {
     await this.ensureExists(id);
-    const data: { dateEntretien?: Date | null; equipeEntretien?: string | null } =
-      {};
+    const data: {
+      dateEntretien?: Date | null;
+      equipeEntretien?: string | null;
+    } = {};
 
     if (updateDto.dateEntretien !== undefined) {
       data.dateEntretien = this.optionalDate(
@@ -248,6 +243,7 @@ export class DemandesBourseService {
       include: {
         elementRequis: { include: { elementSubstitut: true } },
         elementSubstitutUtilise: true,
+        paiements: { select: { montant: true } },
       },
       orderBy: { elementRequis: { nom: 'asc' } },
     });
@@ -303,11 +299,16 @@ export class DemandesBourseService {
       paiementsNonAffectes,
       montantPayeNonAffecte: this.money(montantPayeNonAffecte),
       totalAttendu: this.money(
-        obligations.reduce((total, item) => total + Number(item.montantAttendu), 0),
+        obligations.reduce(
+          (total, item) => total + Number(item.montantAttendu),
+          0,
+        ),
       ),
       totalPaye: this.money(
-        obligations.reduce((total, item) => total + Number(item.montantPaye), 0) +
-          montantPayeNonAffecte,
+        obligations.reduce(
+          (total, item) => total + Number(item.montantPaye),
+          0,
+        ) + montantPayeNonAffecte,
       ),
     };
   }
@@ -317,11 +318,7 @@ export class DemandesBourseService {
     elementRequisId: string,
     updateDto: UpdateElementDossierDto,
   ) {
-    const statut = this.parseValue(
-      updateDto.statut,
-      STATUTS_ELEMENT,
-      'statut',
-    );
+    const statut = this.parseValue(updateDto.statut, STATUTS_ELEMENT, 'statut');
     const element = await this.prisma.elementDossier.findFirst({
       where: { demandeBourseId: demandeId, elementRequisId },
       include: { elementRequis: true },
@@ -394,12 +391,12 @@ export class DemandesBourseService {
     field: string,
   ): T[number] {
     const normalized = value?.trim().toUpperCase();
-    if (!normalized || !allowed.includes(normalized as T[number])) {
+    if (!normalized || !allowed.includes(normalized)) {
       throw new BadRequestException(
         `${field} doit etre parmi: ${allowed.join(', ')}`,
       );
     }
-    return normalized as T[number];
+    return normalized;
   }
 
   private requiredString(value: string | undefined, field: string): string {

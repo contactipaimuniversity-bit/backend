@@ -1,7 +1,8 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RapportsService } from './rapports.service';
+import { PeriodeRapportDto } from './dto/periode-rapport.dto';
 
 @Controller('rapports')
 @UseGuards(JwtAuthGuard, AdminGuard)
@@ -21,5 +22,10 @@ export class RapportsController {
   @Get('synthese')
   synthese() {
     return this.rapportsService.synthese();
+  }
+
+  @Get('activite-periode')
+  activitePeriode(@Query() periode: PeriodeRapportDto) {
+    return this.rapportsService.activitePeriode(periode);
   }
 }

@@ -12,12 +12,7 @@ import { UpdateInscriptionElementDto } from './dto/update-inscription-element.dt
 import { UpdateInscriptionDto } from './dto/update-inscription.dto';
 
 const STATUTS_INSCRIPTION = ['EN_COURS', 'COMPLETE', 'ABANDONNEE'] as const;
-const STATUTS_ELEMENT = [
-  'ATTENDU',
-  'FOURNI',
-  'MANQUANT',
-  'SUBSTITUE',
-] as const;
+const STATUTS_ELEMENT = ['ATTENDU', 'FOURNI', 'MANQUANT', 'SUBSTITUE'] as const;
 
 type StatutInscriptionValue = (typeof STATUTS_INSCRIPTION)[number];
 type StatutElementValue = (typeof STATUTS_ELEMENT)[number];
@@ -139,7 +134,9 @@ export class InscriptionsService {
   ): number {
     const parsed = Number(value ?? fallback);
     if (!Number.isInteger(parsed) || parsed < 1) {
-      throw new BadRequestException('Les paramètres de pagination sont invalides');
+      throw new BadRequestException(
+        'Les paramètres de pagination sont invalides',
+      );
     }
     return Math.min(parsed, maximum);
   }
@@ -218,6 +215,7 @@ export class InscriptionsService {
       include: {
         elementRequis: { include: { elementSubstitut: true } },
         elementSubstitutUtilise: true,
+        paiements: { select: { montant: true } },
       },
       orderBy: { elementRequis: { nom: 'asc' } },
     });

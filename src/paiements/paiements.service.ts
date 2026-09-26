@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -35,8 +36,10 @@ export class PaiementsService {
     if (elementDossierId && !elementDossier) {
       throw new NotFoundException('Obligation de dossier introuvable');
     }
-    const resolvedDemandeBourseId = demandeBourseId ?? elementDossier?.demandeBourseId;
-    const resolvedInscriptionId = inscriptionId ?? elementDossier?.inscriptionId;
+    const resolvedDemandeBourseId =
+      demandeBourseId ?? elementDossier?.demandeBourseId;
+    const resolvedInscriptionId =
+      inscriptionId ?? elementDossier?.inscriptionId;
 
     if (
       (resolvedDemandeBourseId && resolvedInscriptionId) ||
@@ -52,10 +55,14 @@ export class PaiementsService {
       : await this.getInscriptionDossier(resolvedInscriptionId as string);
     if (
       elementDossier &&
-      ((resolvedDemandeBourseId && elementDossier.demandeBourseId !== resolvedDemandeBourseId) ||
-        (resolvedInscriptionId && elementDossier.inscriptionId !== resolvedInscriptionId))
+      ((resolvedDemandeBourseId &&
+        elementDossier.demandeBourseId !== resolvedDemandeBourseId) ||
+        (resolvedInscriptionId &&
+          elementDossier.inscriptionId !== resolvedInscriptionId))
     ) {
-      throw new BadRequestException('Cette obligation ne correspond pas au dossier');
+      throw new BadRequestException(
+        'Cette obligation ne correspond pas au dossier',
+      );
     }
 
     if (typePaiement === 'ECHEANCE_BOURSE' && !echeanceId) {
@@ -114,6 +121,95 @@ export class PaiementsService {
     });
   }
 
+  async findUnassigned() {
+    const payments = await this.prisma.paiement.findMany({
+      where: { elementDossierId: null },
+      include: {
+        demandeBourse: { include: { personne: true } },
+        inscription: { include: { personne: true } },
+      },
+      orderBy: { datePaiement: 'desc' },
+    });
+    return payments.map((payment) => ({
+      id: payment.id,
+      montant: payment.montant,
+      datePaiement: payment.datePaiement,
+      typePaiement: payment.typePaiement,
+      dossierId: payment.demandeBourseId ?? payment.inscriptionId,
+      dossierType: payment.demandeBourseId ? 'demande-bourse' : 'inscription',
+      personne:
+        payment.demandeBourse?.personne ?? payment.inscription?.personne,
+    }));
+  }
+
+  async assignToElement(paymentId: string, elementDossierId: string) {
+    const payment = await this.prisma.paiement.findUnique({
+      where: { id: paymentId },
+      select: {
+        id: true,
+        montant: true,
+        elementDossierId: true,
+        demandeBourseId: true,
+        inscriptionId: true,
+      },
+    });
+    if (!payment) throw new NotFoundException('Paiement introuvable');
+    if (payment.elementDossierId) {
+      throw new ConflictException('Ce paiement est deja affecte');
+    }
+
+    const obligation = await this.prisma.elementDossier.findUnique({
+      where: { id: elementDossierId },
+      select: {
+        id: true,
+        demandeBourseId: true,
+        inscriptionId: true,
+        montantAttendu: true,
+      },
+    });
+    if (!obligation)
+      throw new NotFoundException('Obligation de dossier introuvable');
+    if (
+      obligation.demandeBourseId !== payment.demandeBourseId ||
+      obligation.inscriptionId !== payment.inscriptionId
+    ) {
+      throw new BadRequestException(
+        'Cette obligation ne correspond pas au dossier du paiement',
+      );
+    }
+    if (!obligation.montantAttendu) {
+      throw new BadRequestException(
+        'Cette obligation ne possède pas de montant attendu',
+      );
+    }
+
+    const allocated = await this.prisma.paiement.aggregate({
+      where: { elementDossierId },
+      _sum: { montant: true },
+    });
+    const remaining =
+      Number(obligation.montantAttendu) - Number(allocated._sum.montant ?? 0);
+    if (Number(payment.montant) > remaining) {
+      throw new BadRequestException(
+        'Le paiement depasse le montant restant de cette obligation',
+      );
+    }
+
+    const result = await this.prisma.paiement.updateMany({
+      where: { id: paymentId, elementDossierId: null },
+      data: { elementDossierId },
+    });
+    if (result.count !== 1)
+      throw new ConflictException('Ce paiement a deja ete affecte');
+    return this.prisma.paiement.findUnique({
+      where: { id: paymentId },
+      include: {
+        echeance: true,
+        elementDossier: { include: { elementRequis: true } },
+      },
+    });
+  }
+
   async solde(dossierType: string, dossierId: string) {
     const normalizedType = dossierType.trim().toLowerCase();
     const dossier =
@@ -153,20 +249,27 @@ export class PaiementsService {
     const montantAttenduCumule = this.roundMoney(
       obligations.reduce(
         (total, obligation) =>
-          total + (obligation.montantAttendu ? Number(obligation.montantAttendu) : 0),
+          total +
+          (obligation.montantAttendu ? Number(obligation.montantAttendu) : 0),
         0,
-      ) + echeances.reduce(
-        (total, echeance) =>
-          total + (echeance.montantAttendu ? Number(echeance.montantAttendu) : 0),
+      ) +
+        echeances.reduce(
+          (total, echeance) =>
+            total +
+            (echeance.montantAttendu ? Number(echeance.montantAttendu) : 0),
+          0,
+        ),
+    );
+    const montantPayeCumule = this.roundMoney(
+      paiements.reduce(
+        (total, paiement) => total + Number(paiement.montant),
         0,
       ),
     );
-    const montantPayeCumule = this.roundMoney(
-      paiements.reduce((total, paiement) => total + Number(paiement.montant), 0),
-    );
 
     return {
-      dossierType: normalizedType === 'inscription' ? 'inscription' : 'demande-bourse',
+      dossierType:
+        normalizedType === 'inscription' ? 'inscription' : 'demande-bourse',
       dossierId,
       montantAttenduCumule: montantAttenduCumule.toFixed(2),
       montantPayeCumule: montantPayeCumule.toFixed(2),
@@ -206,7 +309,10 @@ export class PaiementsService {
 
   private parseTypePaiement(value: string | undefined): TypePaiementValue {
     const normalized = value?.trim().toUpperCase();
-    if (!normalized || !TYPES_PAIEMENT.includes(normalized as TypePaiementValue)) {
+    if (
+      !normalized ||
+      !TYPES_PAIEMENT.includes(normalized as TypePaiementValue)
+    ) {
       throw new BadRequestException(
         `typePaiement doit etre parmi: ${TYPES_PAIEMENT.join(', ')}`,
       );
@@ -223,7 +329,9 @@ export class PaiementsService {
       throw new BadRequestException('montant doit etre strictement positif');
     }
     if (!/^\d+(\.\d{1,2})?$/.test(String(value))) {
-      throw new BadRequestException('montant doit avoir au maximum 2 decimales');
+      throw new BadRequestException(
+        'montant doit avoir au maximum 2 decimales',
+      );
     }
     return parsed.toFixed(2);
   }

@@ -3,11 +3,13 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreatePaiementDto } from './dto/create-paiement.dto';
+import { AssignPaiementDto } from './dto/assign-paiement.dto';
 import { PaiementsService } from './paiements.service';
 
 @Controller()
@@ -18,6 +20,16 @@ export class PaiementsController {
   @Post('paiements')
   create(@Body() createDto: CreatePaiementDto) {
     return this.paiementsService.create(createDto);
+  }
+
+  @Get('paiements/non-affectes')
+  findUnassigned() {
+    return this.paiementsService.findUnassigned();
+  }
+
+  @Patch('paiements/:id/affectation')
+  assignToElement(@Param('id') id: string, @Body() dto: AssignPaiementDto) {
+    return this.paiementsService.assignToElement(id, dto.elementDossierId);
   }
 
   @Get('demandes-bourse/:id/paiements')
