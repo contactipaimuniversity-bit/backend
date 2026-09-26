@@ -1,2 +1,2 @@
 -- DropIndex
-DROP INDEX "paiements_elementDossierId_idx";
+DROP INDEX IF EXISTS "paiements_elementDossierId_idx";
