@@ -36,6 +36,34 @@ async function main() {
       montantAttendu: '10000.00',
     },
     {
+      nom: "Copie de l'acte de naissance",
+      categorie: $Enums.CategorieElement.DOCUMENT,
+      contexte: $Enums.ContexteElement.BOURSE,
+      niveauApplicable: $Enums.NiveauApplicable.TOUS,
+      montantAttendu: null,
+    },
+    {
+      nom: "Copie de la piece d'identite",
+      categorie: $Enums.CategorieElement.DOCUMENT,
+      contexte: $Enums.ContexteElement.BOURSE,
+      niveauApplicable: $Enums.NiveauApplicable.TOUS,
+      montantAttendu: null,
+    },
+    {
+      nom: 'Dernier releve de notes',
+      categorie: $Enums.CategorieElement.DOCUMENT,
+      contexte: $Enums.ContexteElement.BOURSE,
+      niveauApplicable: $Enums.NiveauApplicable.TOUS,
+      montantAttendu: null,
+    },
+    {
+      nom: "Photo d'identite",
+      categorie: $Enums.CategorieElement.DOCUMENT,
+      contexte: $Enums.ContexteElement.BOURSE,
+      niveauApplicable: $Enums.NiveauApplicable.TOUS,
+      montantAttendu: null,
+    },
+    {
       nom: "Frais d'inscription",
       categorie: $Enums.CategorieElement.FRAIS,
       contexte: $Enums.ContexteElement.INSCRIPTION_DIRECTE,
@@ -79,6 +107,8 @@ async function main() {
     });
     if (!existing) {
       await prisma.elementRequis.create({ data: item });
+    } else {
+      await prisma.elementRequis.update({ where: { id: existing.id }, data: item });
     }
   }
 

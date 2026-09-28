@@ -1,5 +1,8 @@
+import { CreatePersonneDto } from '../../personnes/dto/create-personne.dto';
+
 export class CreateInscriptionDto {
-  personneId!: string;
+  personneId?: string;
+  nouvellePersonne?: CreatePersonneDto;
   anneeScolaire!: string;
   niveau!: string;
   filiere!: string;

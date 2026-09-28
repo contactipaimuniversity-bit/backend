@@ -27,20 +27,24 @@ export class ElementsRequisService {
 
   findAll(search: SearchElementsRequisDto) {
     const where: {
-      contexte?: ContexteValue;
-      niveauApplicable?: NiveauValue;
+      contexte?: ContexteValue | { in: ContexteValue[] };
+      niveauApplicable?: NiveauValue | { in: NiveauValue[] };
       categorie?: CategorieValue;
     } = {};
 
     if (search.contexte) {
-      where.contexte = this.parseValue(search.contexte, CONTEXTES, 'contexte');
+      const contexte = this.parseValue(search.contexte, CONTEXTES, 'contexte');
+      where.contexte = contexte === 'TOUS' ? contexte : { in: [contexte, 'TOUS'] };
     }
     if (search.niveauApplicable) {
-      where.niveauApplicable = this.parseValue(
+      const niveauApplicable = this.parseValue(
         search.niveauApplicable,
         NIVEAUX,
         'niveauApplicable',
       );
+      where.niveauApplicable = niveauApplicable === 'TOUS'
+        ? niveauApplicable
+        : { in: [niveauApplicable, 'TOUS'] };
     }
     if (search.categorie) {
       where.categorie = this.parseValue(

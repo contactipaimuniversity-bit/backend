@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
@@ -13,6 +14,7 @@ import { RapportsModule } from './rapports/rapports.module';
 import { TypesBourseModule } from './types-bourse/types-bourse.module';
 import { UtilisateursModule } from './utilisateurs/utilisateurs.module';
 import { CandidaturesPersonnelModule } from './candidatures-personnel/candidatures-personnel.module';
+import { IdempotencyInterceptor } from './idempotency/idempotency.interceptor';
 
 @Module({
   imports: [
@@ -30,6 +32,6 @@ import { CandidaturesPersonnelModule } from './candidatures-personnel/candidatur
     CandidaturesPersonnelModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor }],
 })
 export class AppModule {}

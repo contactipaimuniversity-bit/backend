@@ -121,6 +121,33 @@ export class PaiementsService {
     });
   }
 
+  async findAll() {
+    const payments = await this.prisma.paiement.findMany({
+      include: {
+        demandeBourse: { include: { personne: true } },
+        inscription: { include: { personne: true } },
+        elementDossier: { include: { elementRequis: true } },
+        echeance: true,
+      },
+      orderBy: { datePaiement: 'desc' },
+    });
+    return payments.map((payment) => ({
+      id: payment.id,
+      montant: payment.montant,
+      datePaiement: payment.datePaiement,
+      typePaiement: payment.typePaiement,
+      dossierId: payment.demandeBourseId ?? payment.inscriptionId,
+      dossierType: payment.demandeBourseId ? 'demande-bourse' : 'inscription',
+      dossier: payment.demandeBourse
+        ? `Demande · ${payment.demandeBourse.filiereSouhaitee}`
+        : `Inscription · ${payment.inscription?.filiere ?? '-'}`,
+      personne: payment.demandeBourse?.personne ?? payment.inscription?.personne,
+      obligation: payment.elementDossier?.elementRequis.nom ?? null,
+      echeance: payment.echeance?.libelle ?? null,
+      affecte: payment.elementDossier !== null,
+    }));
+  }
+
   async findUnassigned() {
     const payments = await this.prisma.paiement.findMany({
       where: { elementDossierId: null },

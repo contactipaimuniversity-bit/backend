@@ -85,6 +85,7 @@ enum StatutElementPersonnel {
 model Utilisateur {
   id         String @id @default(uuid())
   nom        String
+  prenom     String?
   email      String @unique
   motDePasse String
   role       String
@@ -92,6 +93,20 @@ model Utilisateur {
   personnesCreees Personne[]
 
   @@map("utilisateurs")
+}
+
+model IdempotencyRecord {
+  id             String   @id @default(uuid())
+  userId         String
+  key            String
+  requestHash    String
+  responseBody   String?
+  responseStatus Int?
+  completedAt    DateTime?
+  createdAt      DateTime @default(now())
+
+  @@unique([userId, key])
+  @@map("idempotency_records")
 }
 
 model Personne {

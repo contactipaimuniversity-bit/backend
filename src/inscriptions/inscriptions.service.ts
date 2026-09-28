@@ -21,26 +21,62 @@ type StatutElementValue = (typeof STATUTS_ELEMENT)[number];
 export class InscriptionsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(createDto: CreateInscriptionDto) {
-    const personneId = this.requiredString(createDto.personneId, 'personneId');
+  async create(createDto: CreateInscriptionDto, creeParId: string) {
+    const nouvellePersonne = createDto.nouvellePersonne;
+    const viaBourse = createDto.viaBourse === true;
+    if (nouvellePersonne && (createDto.personneId || viaBourse)) {
+      throw new BadRequestException(
+        'Une inscription via bourse doit utiliser la personne de la demande liée',
+      );
+    }
+    const personneId = nouvellePersonne
+      ? null
+      : this.requiredString(createDto.personneId, 'personneId');
+    const nomNouvellePersonne = nouvellePersonne
+      ? this.requiredString(nouvellePersonne.nom, 'nom')
+      : null;
+    const prenomNouvellePersonne = nouvellePersonne
+      ? this.requiredString(nouvellePersonne.prenom, 'prenom')
+      : null;
     const anneeScolaire = this.requiredString(
       createDto.anneeScolaire,
       'anneeScolaire',
     );
     const niveau = this.requiredString(createDto.niveau, 'niveau');
     const filiere = this.requiredString(createDto.filiere, 'filiere');
-    const viaBourse = createDto.viaBourse === true;
     const demandeBourseId = this.optionalString(createDto.demandeBourseId);
 
-    await this.ensurePersonne(personneId);
+    if (personneId) await this.ensurePersonne(personneId);
     await this.ensureBourseCoherence(
-      personneId,
+      personneId ?? '',
       viaBourse,
       demandeBourseId,
       createDto.confirmerDemandeEnCours === true,
     );
 
     return this.prisma.$transaction(async (transaction) => {
+      const resolvedPersonneId = nouvellePersonne
+        ? (
+            await transaction.personne.create({
+              data: {
+                nom: nomNouvellePersonne!,
+                prenom: prenomNouvellePersonne!,
+                telephone: this.optionalString(nouvellePersonne.telephone),
+                quartier: this.optionalString(nouvellePersonne.quartier),
+                dateNaissance: this.optionalDate(
+                  nouvellePersonne.dateNaissance,
+                  'dateNaissance',
+                ),
+                lieuNaissance: this.optionalString(nouvellePersonne.lieuNaissance),
+                tuteurNom: this.optionalString(nouvellePersonne.tuteurNom),
+                tuteurPrenom: this.optionalString(nouvellePersonne.tuteurPrenom),
+                tuteurTelephone: this.optionalString(nouvellePersonne.tuteurTelephone),
+                creeParId,
+              },
+              select: { id: true },
+            })
+          ).id
+        : personneId!;
       const catalogue = await transaction.elementRequis.findMany({
         where: {
           contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] },
@@ -50,7 +86,7 @@ export class InscriptionsService {
 
       return transaction.inscription.create({
         data: {
-          personneId,
+          personneId: resolvedPersonneId,
           anneeScolaire,
           niveau,
           filiere,
@@ -109,6 +145,7 @@ export class InscriptionsService {
         include: {
           personne: true,
           demandeBourse: true,
+          elementsDossier: { select: { statut: true, montantAttendu: true, paiements: { select: { montant: true } }, elementRequis: { select: { nom: true } } } },
         },
         orderBy: { dateInscription: 'desc' },
         skip: (page - 1) * limit,
@@ -117,7 +154,22 @@ export class InscriptionsService {
     ]);
 
     return {
-      data,
+      data: data.map((inscription) => ({
+        ...inscription,
+        elementsManquants: inscription.elementsDossier
+          .filter((element) => element.statut !== 'FOURNI' && element.statut !== 'SUBSTITUE')
+          .map((element) => element.elementRequis.nom),
+        obligationsImpayees: inscription.elementsDossier.flatMap((element) => {
+          if (element.montantAttendu === null) return [];
+          const reste = Number(element.montantAttendu) - element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+          return reste > 0 ? [{ nom: element.elementRequis.nom, reste: reste.toFixed(2) }] : [];
+        }),
+        dossierComplet: inscription.elementsDossier.every((element) => {
+          const documentComplet = element.statut === 'FOURNI' || element.statut === 'SUBSTITUE';
+          const reste = element.montantAttendu === null ? 0 : Number(element.montantAttendu) - element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+          return documentComplet && reste <= 0;
+        }),
+      })),
       meta: {
         page,
         limit,
@@ -210,6 +262,7 @@ export class InscriptionsService {
 
   async findElements(id: string) {
     await this.ensureExists(id);
+    await this.ensureElementsForDossier(id);
     return this.prisma.elementDossier.findMany({
       where: { inscriptionId: id },
       include: {
@@ -218,6 +271,68 @@ export class InscriptionsService {
         paiements: { select: { montant: true } },
       },
       orderBy: { elementRequis: { nom: 'asc' } },
+    });
+  }
+
+  async findFinance(id: string) {
+    await this.ensureExists(id);
+    await this.ensureElementsForDossier(id);
+    const inscription = await this.prisma.inscription.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        elementsDossier: {
+          include: { elementRequis: true, paiements: true },
+          orderBy: { elementRequis: { nom: 'asc' } },
+        },
+        paiements: { where: { elementDossierId: null }, select: { montant: true } },
+      },
+    });
+    if (!inscription) throw new NotFoundException('Inscription introuvable');
+    const obligations = inscription.elementsDossier.map((element) => {
+      const montantAttendu = Number(element.montantAttendu ?? 0);
+      const montantPaye = element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+      return {
+        id: element.id,
+        nom: element.elementRequis.nom,
+        categorie: element.elementRequis.categorie,
+        statut: element.statut,
+        montantAttendu: this.money(montantAttendu),
+        montantPaye: this.money(montantPaye),
+        resteAPayer: this.money(Math.max(0, montantAttendu - montantPaye)),
+      };
+    });
+    const montantPayeNonAffecte = inscription.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+    return {
+      demandeId: id,
+      obligations,
+      montantPayeNonAffecte: this.money(montantPayeNonAffecte),
+      totalAttendu: this.money(obligations.reduce((total, obligation) => total + Number(obligation.montantAttendu), 0)),
+      totalPaye: this.money(obligations.reduce((total, obligation) => total + Number(obligation.montantPaye), 0) + montantPayeNonAffecte),
+    };
+  }
+
+  private async ensureElementsForDossier(id: string) {
+    const inscription = await this.prisma.inscription.findUnique({
+      where: { id },
+      select: { niveau: true },
+    });
+    if (!inscription) return;
+    const catalogue = await this.prisma.elementRequis.findMany({
+      where: {
+        contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] },
+        niveauApplicable: this.niveauApplicable(inscription.niveau),
+      },
+      select: { id: true, montantAttendu: true },
+    });
+    if (!catalogue.length) return;
+    await this.prisma.elementDossier.createMany({
+      data: catalogue.map((element) => ({
+        inscriptionId: id,
+        elementRequisId: element.id,
+        montantAttendu: element.montantAttendu,
+      })),
+      skipDuplicates: true,
     });
   }
 
@@ -392,5 +507,18 @@ export class InscriptionsService {
     }
     const normalized = value.trim();
     return normalized || null;
+  }
+
+  private optionalDate(value: string | null | undefined, field: string): Date | null {
+    if (value === null || value === undefined || value.trim() === '') return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException(`${field} doit etre une date valide`);
+    }
+    return date;
+  }
+
+  private money(value: number): string {
+    return value.toFixed(2);
   }
 }

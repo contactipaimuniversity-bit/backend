@@ -28,8 +28,22 @@ type StatutElementValue = (typeof STATUTS_ELEMENT)[number];
 export class DemandesBourseService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(createDto: CreateDemandeBourseDto) {
-    const personneId = this.requiredString(createDto.personneId, 'personneId');
+  async create(createDto: CreateDemandeBourseDto, creeParId: string) {
+    const nouvellePersonne = createDto.nouvellePersonne;
+    if (nouvellePersonne && createDto.personneId) {
+      throw new BadRequestException(
+        'Choisissez une personne existante ou renseignez une nouvelle personne',
+      );
+    }
+    const personneId = nouvellePersonne
+      ? null
+      : this.requiredString(createDto.personneId, 'personneId');
+    const nomNouvellePersonne = nouvellePersonne
+      ? this.requiredString(nouvellePersonne.nom, 'nom')
+      : null;
+    const prenomNouvellePersonne = nouvellePersonne
+      ? this.requiredString(nouvellePersonne.prenom, 'prenom')
+      : null;
     const niveauDemande = this.parseValue(
       createDto.niveauDemande,
       NIVEAUX,
@@ -40,15 +54,39 @@ export class DemandesBourseService {
       'filiereSouhaitee',
     );
 
-    const personne = await this.prisma.personne.findUnique({
-      where: { id: personneId },
-      select: { id: true },
-    });
-    if (!personne) {
-      throw new NotFoundException('Personne introuvable');
+    if (personneId) {
+      const personne = await this.prisma.personne.findUnique({
+        where: { id: personneId },
+        select: { id: true },
+      });
+      if (!personne) {
+        throw new NotFoundException('Personne introuvable');
+      }
     }
 
     return this.prisma.$transaction(async (transaction) => {
+      const resolvedPersonneId = nouvellePersonne
+        ? (
+            await transaction.personne.create({
+              data: {
+                nom: nomNouvellePersonne!,
+                prenom: prenomNouvellePersonne!,
+                telephone: this.optionalString(nouvellePersonne.telephone),
+                quartier: this.optionalString(nouvellePersonne.quartier),
+                dateNaissance: this.optionalDate(
+                  nouvellePersonne.dateNaissance,
+                  'dateNaissance',
+                ),
+                lieuNaissance: this.optionalString(nouvellePersonne.lieuNaissance),
+                tuteurNom: this.optionalString(nouvellePersonne.tuteurNom),
+                tuteurPrenom: this.optionalString(nouvellePersonne.tuteurPrenom),
+                tuteurTelephone: this.optionalString(nouvellePersonne.tuteurTelephone),
+                creeParId,
+              },
+              select: { id: true },
+            })
+          ).id
+        : personneId!;
       const catalogue = await transaction.elementRequis.findMany({
         where: {
           contexte: { in: ['BOURSE', 'TOUS'] },
@@ -61,7 +99,7 @@ export class DemandesBourseService {
 
       const demande = await transaction.demandeBourse.create({
         data: {
-          personneId,
+          personneId: resolvedPersonneId,
           niveauDemande,
           filiereSouhaitee,
           filiereSecondaireSouhaitee: this.optionalString(
@@ -120,6 +158,7 @@ export class DemandesBourseService {
         include: {
           personne: true,
           typeBourse: true,
+          elementsDossier: { select: { statut: true, montantAttendu: true, paiements: { select: { montant: true } }, elementRequis: { select: { nom: true } } } },
         },
         orderBy: { dateDepot: 'desc' },
         skip: (page - 1) * limit,
@@ -128,7 +167,22 @@ export class DemandesBourseService {
     ]);
 
     return {
-      data,
+      data: data.map((demande) => ({
+        ...demande,
+        elementsManquants: demande.elementsDossier
+          .filter((element) => element.statut !== 'FOURNI' && element.statut !== 'SUBSTITUE')
+          .map((element) => element.elementRequis.nom),
+        obligationsImpayees: demande.elementsDossier.flatMap((element) => {
+          if (element.montantAttendu === null) return [];
+          const reste = Number(element.montantAttendu) - element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+          return reste > 0 ? [{ nom: element.elementRequis.nom, reste: this.money(reste) }] : [];
+        }),
+        dossierComplet: demande.elementsDossier.every((element) => {
+          const documentComplet = element.statut === 'FOURNI' || element.statut === 'SUBSTITUE';
+          const reste = element.montantAttendu === null ? 0 : Number(element.montantAttendu) - element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+          return documentComplet && reste <= 0;
+        }),
+      })),
       meta: {
         page,
         limit,

@@ -22,6 +22,11 @@ export class PaiementsController {
     return this.paiementsService.create(createDto);
   }
 
+  @Get('paiements')
+  findAll() {
+    return this.paiementsService.findAll();
+  }
+
   @Get('paiements/non-affectes')
   findUnassigned() {
     return this.paiementsService.findUnassigned();

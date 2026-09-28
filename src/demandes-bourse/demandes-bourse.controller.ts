@@ -6,8 +6,10 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
+import { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateDemandeBourseDto } from './dto/create-demande-bourse.dto';
 import { SearchDemandesBourseDto } from './dto/search-demandes-bourse.dto';
@@ -16,14 +18,19 @@ import { UpdateElementDossierDto } from './dto/update-element-dossier.dto';
 import { UpdateEntretienDto } from './dto/update-entretien.dto';
 import { DemandesBourseService } from './demandes-bourse.service';
 
+type AuthenticatedRequest = Request & { user: { sub: string } };
+
 @Controller('demandes-bourse')
 @UseGuards(JwtAuthGuard)
 export class DemandesBourseController {
   constructor(private readonly demandesBourseService: DemandesBourseService) {}
 
   @Post()
-  create(@Body() createDto: CreateDemandeBourseDto) {
-    return this.demandesBourseService.create(createDto);
+  create(
+    @Body() createDto: CreateDemandeBourseDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.demandesBourseService.create(createDto, request.user.sub);
   }
 
   @Get()

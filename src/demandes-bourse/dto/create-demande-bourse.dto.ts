@@ -1,5 +1,8 @@
+import { CreatePersonneDto } from '../../personnes/dto/create-personne.dto';
+
 export class CreateDemandeBourseDto {
-  personneId!: string;
+  personneId?: string;
+  nouvellePersonne?: CreatePersonneDto;
   niveauDemande!: string;
   filiereSouhaitee!: string;
   filiereSecondaireSouhaitee?: string;

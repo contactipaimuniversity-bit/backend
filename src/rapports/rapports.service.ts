@@ -103,7 +103,7 @@ export class RapportsService {
   }
 
   async synthese() {
-    const [prospectsActifs, demandesEnCours, inscriptions, paiements] =
+    const [prospectsActifs, demandesEnCours, inscriptions, paiements, demandesDates, inscriptionsDates, obligations] =
       await Promise.all([
         this.prisma.prospect.count({
           where: { statutRelance: { in: ['A_RELANCER', 'RELANCE'] } },
@@ -124,7 +124,30 @@ export class RapportsService {
           },
         }),
         this.prisma.paiement.aggregate({ _sum: { montant: true } }),
+        this.prisma.demandeBourse.findMany({ select: { dateDepot: true } }),
+        this.prisma.inscription.findMany({ select: { dateInscription: true } }),
+        this.prisma.elementDossier.findMany({
+          select: { montantAttendu: true, demandeBourseId: true, inscriptionId: true, paiements: { select: { montant: true } } },
+        }),
       ]);
+
+    const resteBourses = obligations
+      .filter((element) => element.demandeBourseId)
+      .reduce((total, element) => total + Math.max(0, Number(element.montantAttendu ?? 0) - element.paiements.reduce((sum, payment) => sum + Number(payment.montant), 0)), 0);
+    const resteInscriptions = obligations
+      .filter((element) => element.inscriptionId)
+      .reduce((total, element) => total + Math.max(0, Number(element.montantAttendu ?? 0) - element.paiements.reduce((sum, payment) => sum + Number(payment.montant), 0)), 0);
+    const now = new Date();
+    const tendance = Array.from({ length: 6 }, (_, index) => {
+      const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 5 + index, 1));
+      const next = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1));
+      const inMonth = (value: Date) => value >= date && value < next;
+      return {
+        label: new Intl.DateTimeFormat('fr-FR', { month: 'short', timeZone: 'UTC' }).format(date),
+        demandes: demandesDates.filter((item) => inMonth(item.dateDepot)).length,
+        inscriptions: inscriptionsDates.filter((item) => inMonth(item.dateInscription)).length,
+      };
+    });
 
     const inscriptionsParType = new Map<
       string,
@@ -154,6 +177,10 @@ export class RapportsService {
         (first, second) => first.typeBourse.localeCompare(second.typeBourse),
       ),
       totalEncaisse: this.money(Number(paiements._sum.montant ?? 0)),
+      resteBourses: this.money(resteBourses),
+      resteInscriptions: this.money(resteInscriptions),
+      totalResteARecouvrer: this.money(resteBourses + resteInscriptions),
+      tendance,
     };
   }
 
