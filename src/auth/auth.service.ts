@@ -24,6 +24,7 @@ export class AuthService {
 
     const utilisateur = await this.prisma.utilisateur.findUnique({
       where: { email },
+      include: { poste: { select: { id: true, nom: true } } },
     });
 
     if (!utilisateur || !(await bcrypt.compare(motDePasse, utilisateur.motDePasse))) {
@@ -36,6 +37,9 @@ export class AuthService {
       nom: utilisateur.nom,
       prenom: utilisateur.prenom,
       role: utilisateur.role,
+      posteId: utilisateur.posteId,
+      poste: utilisateur.poste ? { id: utilisateur.poste.id, nom: utilisateur.poste.nom } : null,
+      permissions: utilisateur.permissions,
     };
 
     return {
@@ -46,6 +50,9 @@ export class AuthService {
         prenom: utilisateur.prenom,
         email: utilisateur.email,
         role: utilisateur.role,
+        posteId: utilisateur.posteId,
+        poste: utilisateur.poste,
+        permissions: utilisateur.permissions,
       },
     };
   }

@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { MotifSuppressionDto } from '../corbeille/dto/motif-suppression.dto';
 import { CreateInscriptionDto } from './dto/create-inscription.dto';
 import { SearchInscriptionsDto } from './dto/search-inscriptions.dto';
 import { UpdateInscriptionElementDto } from './dto/update-inscription-element.dto';
@@ -39,8 +40,12 @@ export class InscriptionsController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.inscriptionsService.remove(id);
+  remove(
+    @Param('id') id: string,
+    @Body() body: MotifSuppressionDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.inscriptionsService.remove(id, body.motif, request.user.sub);
   }
 
   @Get(':id/elements')

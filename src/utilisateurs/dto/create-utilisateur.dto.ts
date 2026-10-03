@@ -3,4 +3,6 @@ export class CreateUtilisateurDto {
   email!: string;
   motDePasse!: string;
   role?: string;
+  posteId?: string | null;
+  permissions?: string[];
 }

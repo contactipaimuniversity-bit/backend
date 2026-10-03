@@ -10,6 +10,7 @@ import { CreateInscriptionDto } from './dto/create-inscription.dto';
 import { SearchInscriptionsDto } from './dto/search-inscriptions.dto';
 import { UpdateInscriptionElementDto } from './dto/update-inscription-element.dto';
 import { UpdateInscriptionDto } from './dto/update-inscription.dto';
+import { requiredDeletionReason, toTrashSnapshot } from '../corbeille/corbeille.utils';
 
 const STATUTS_INSCRIPTION = ['EN_COURS', 'COMPLETE', 'ABANDONNEE'] as const;
 const STATUTS_ELEMENT = ['ATTENDU', 'FOURNI', 'MANQUANT', 'SUBSTITUE'] as const;
@@ -305,11 +306,28 @@ export class InscriptionsService {
     return inscription;
   }
 
-  async remove(id: string) {
+  async remove(id: string, rawReason: string, deletedById: string) {
+    const motif = requiredDeletionReason(rawReason);
     return this.prisma.$transaction(async (transaction) => {
       const inscription = await transaction.inscription.findUnique({
         where: { id },
-        select: { id: true },
+        include: {
+          personne: true,
+          demandeBourse: { include: { typeBourse: { include: { echeances: true } } } },
+          elementsDossier: {
+            include: {
+              elementRequis: true,
+              elementSubstitutUtilise: true,
+              paiements: { include: { echeance: true } },
+            },
+          },
+          paiements: {
+            include: {
+              echeance: true,
+              elementDossier: { include: { elementRequis: true } },
+            },
+          },
+        },
       });
       if (!inscription) {
         throw new NotFoundException('Inscription introuvable');
@@ -318,6 +336,21 @@ export class InscriptionsService {
       const elements = await transaction.elementDossier.findMany({
         where: { inscriptionId: id },
         select: { id: true },
+      });
+      const author = await transaction.utilisateur.findUnique({
+        where: { id: deletedById },
+        select: { id: true, nom: true, prenom: true },
+      });
+      await transaction.elementCorbeille.create({
+        data: {
+          type: 'INSCRIPTION',
+          entiteId: id,
+          libelle: `${inscription.personne.prenom} ${inscription.personne.nom} · ${inscription.filiere} · ${inscription.anneeScolaire}`,
+          motif,
+          supprimeParId: author?.id ?? deletedById,
+          supprimeParNom: [author?.prenom, author?.nom].filter(Boolean).join(' ') || 'Utilisateur inconnu',
+          donnees: toTrashSnapshot(inscription),
+        },
       });
       await transaction.paiement.deleteMany({
         where: {

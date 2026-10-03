@@ -69,9 +69,16 @@ export class CandidaturesPersonnelService {
     await this.exists(id);
     const statut = dto.statut ? this.parse(dto.statut, STATUTS, 'statut') : undefined;
     const dateEntretien = dto.dateEntretien === undefined ? undefined : this.date(dto.dateEntretien);
+    const dateNaissance = dto.dateNaissance === undefined ? undefined : this.date(dto.dateNaissance);
     return this.prisma.candidaturePersonnel.update({
       where: { id },
       data: {
+        nom: dto.nom === undefined ? undefined : this.required(dto.nom, 'nom'),
+        prenom: dto.prenom === undefined ? undefined : this.required(dto.prenom, 'prenom'),
+        diplome: dto.diplome === undefined ? undefined : this.required(dto.diplome, 'diplome'),
+        fonction: dto.fonction === undefined ? undefined : this.required(dto.fonction, 'fonction'),
+        quartier: dto.quartier === undefined ? undefined : this.optional(dto.quartier),
+        dateNaissance,
         statut,
         dateEntretien,
         equipeEntretien: dto.equipeEntretien === undefined ? undefined : this.optional(dto.equipeEntretien),

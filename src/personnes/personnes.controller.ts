@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -11,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { MotifSuppressionDto } from '../corbeille/dto/motif-suppression.dto';
 import { CreatePersonneDto } from './dto/create-personne.dto';
 import { SearchPersonnesDto } from './dto/search-personnes.dto';
 import { UpdatePersonneDto } from './dto/update-personne.dto';
@@ -51,5 +53,14 @@ export class PersonnesController {
   @Patch(':id')
   update(@Param('id') id: string, @Body() updateDto: UpdatePersonneDto) {
     return this.personnesService.update(id, updateDto);
+  }
+
+  @Delete(':id')
+  remove(
+    @Param('id') id: string,
+    @Body() body: MotifSuppressionDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.personnesService.remove(id, body.motif, request.user.sub);
   }
 }

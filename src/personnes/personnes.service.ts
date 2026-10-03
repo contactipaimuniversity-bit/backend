@@ -7,6 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreatePersonneDto } from './dto/create-personne.dto';
 import { SearchPersonnesDto } from './dto/search-personnes.dto';
 import { UpdatePersonneDto } from './dto/update-personne.dto';
+import { requiredDeletionReason, toTrashSnapshot } from '../corbeille/corbeille.utils';
 
 @Injectable()
 export class PersonnesService {
@@ -169,6 +170,118 @@ export class PersonnesService {
     return this.prisma.personne.update({
       where: { id },
       data,
+    });
+  }
+
+  async remove(id: string, rawReason: string, deletedById: string) {
+    const motif = requiredDeletionReason(rawReason);
+    return this.prisma.$transaction(async (transaction) => {
+      const personne = await transaction.personne.findUnique({ where: { id } });
+      if (!personne) throw new NotFoundException('Personne introuvable');
+
+      const prospect = await transaction.prospect.findUnique({
+        where: { personneId: id },
+        include: { themes: true },
+      });
+      const demandes = await transaction.demandeBourse.findMany({
+        where: { personneId: id },
+        include: {
+          typeBourse: { include: { echeances: true } },
+          elementsDossier: {
+            include: {
+              elementRequis: true,
+              elementSubstitutUtilise: true,
+              paiements: { include: { echeance: true } },
+            },
+          },
+        },
+      });
+      const demandeIds = demandes.map((demande) => demande.id);
+      const inscriptions = await transaction.inscription.findMany({
+        where: {
+          OR: [
+            { personneId: id },
+            { demandeBourseId: { in: demandeIds } },
+          ],
+        },
+        include: {
+          demandeBourse: { include: { typeBourse: true } },
+          elementsDossier: {
+            include: {
+              elementRequis: true,
+              elementSubstitutUtilise: true,
+              paiements: { include: { echeance: true } },
+            },
+          },
+        },
+      });
+      const inscriptionIds = inscriptions.map((inscription) => inscription.id);
+      const elements = await transaction.elementDossier.findMany({
+        where: {
+          OR: [
+            { demandeBourseId: { in: demandeIds } },
+            { inscriptionId: { in: inscriptionIds } },
+          ],
+        },
+        include: {
+          elementRequis: true,
+          elementSubstitutUtilise: true,
+          paiements: { include: { echeance: true } },
+        },
+      });
+      const elementIds = elements.map((element) => element.id);
+      const paiements = await transaction.paiement.findMany({
+        where: {
+          OR: [
+            { demandeBourseId: { in: demandeIds } },
+            { inscriptionId: { in: inscriptionIds } },
+            { elementDossierId: { in: elementIds } },
+          ],
+        },
+        include: { echeance: true, elementDossier: { include: { elementRequis: true } } },
+      });
+      const author = await transaction.utilisateur.findUnique({
+        where: { id: deletedById },
+        select: { id: true, nom: true, prenom: true },
+      });
+
+      await transaction.elementCorbeille.create({
+        data: {
+          type: 'PERSONNE',
+          entiteId: id,
+          libelle: `${personne.prenom} ${personne.nom}`,
+          motif,
+          supprimeParId: author?.id ?? deletedById,
+          supprimeParNom: [author?.prenom, author?.nom].filter(Boolean).join(' ') || 'Utilisateur inconnu',
+          donnees: toTrashSnapshot({ personne, prospect, demandesBourse: demandes, inscriptions, elementsDossier: elements, paiements }),
+        },
+      });
+
+      await transaction.paiement.deleteMany({
+        where: {
+          OR: [
+            { demandeBourseId: { in: demandeIds } },
+            { inscriptionId: { in: inscriptionIds } },
+            { elementDossierId: { in: elementIds } },
+          ],
+        },
+      });
+      await transaction.elementDossier.deleteMany({
+        where: {
+          OR: [
+            { demandeBourseId: { in: demandeIds } },
+            { inscriptionId: { in: inscriptionIds } },
+          ],
+        },
+      });
+      await transaction.inscription.deleteMany({ where: { id: { in: inscriptionIds } } });
+      await transaction.demandeBourse.deleteMany({ where: { id: { in: demandeIds } } });
+      if (prospect) {
+        await transaction.themeDiscussion.deleteMany({ where: { prospectId: prospect.id } });
+        await transaction.prospect.delete({ where: { id: prospect.id } });
+      }
+      await transaction.personne.delete({ where: { id } });
+      return { id };
     });
   }
 

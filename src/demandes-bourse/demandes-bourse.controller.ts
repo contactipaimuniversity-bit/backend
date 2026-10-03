@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { MotifSuppressionDto } from '../corbeille/dto/motif-suppression.dto';
 import { CreateDemandeBourseDto } from './dto/create-demande-bourse.dto';
 import { SearchDemandesBourseDto } from './dto/search-demandes-bourse.dto';
 import { UpdateDecisionDto } from './dto/update-decision.dto';
@@ -40,8 +41,12 @@ export class DemandesBourseController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.demandesBourseService.remove(id);
+  remove(
+    @Param('id') id: string,
+    @Body() body: MotifSuppressionDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.demandesBourseService.remove(id, body.motif, request.user.sub);
   }
 
   @Get(':id/elements')

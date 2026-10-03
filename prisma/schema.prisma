@@ -89,10 +89,22 @@ model Utilisateur {
   email      String @unique
   motDePasse String
   role       String
+  posteId    String?
+  poste      Poste?  @relation(fields: [posteId], references: [id], onDelete: SetNull)
+  permissions String[] @default([])
 
   personnesCreees Personne[]
 
   @@map("utilisateurs")
+}
+
+model Poste {
+  id          String   @id @default(uuid())
+  nom         String   @unique
+  permissions String[] @default([])
+  utilisateurs Utilisateur[]
+
+  @@map("postes")
 }
 
 model IdempotencyRecord {
@@ -107,6 +119,22 @@ model IdempotencyRecord {
 
   @@unique([userId, key])
   @@map("idempotency_records")
+}
+
+model ElementCorbeille {
+  id             String   @id @default(uuid())
+  type           String
+  entiteId       String
+  libelle        String
+  motif          String
+  supprimeParId  String?
+  supprimeParNom String
+  dateSuppression DateTime @default(now())
+  donnees        Json
+
+  @@index([dateSuppression])
+  @@index([type])
+  @@map("corbeille")
 }
 
 model Personne {

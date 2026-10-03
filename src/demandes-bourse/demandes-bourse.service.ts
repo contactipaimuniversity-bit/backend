@@ -9,6 +9,7 @@ import { SearchDemandesBourseDto } from './dto/search-demandes-bourse.dto';
 import { UpdateDecisionDto } from './dto/update-decision.dto';
 import { UpdateElementDossierDto } from './dto/update-element-dossier.dto';
 import { UpdateEntretienDto } from './dto/update-entretien.dto';
+import { requiredDeletionReason, toTrashSnapshot } from '../corbeille/corbeille.utils';
 
 const NIVEAUX = ['PREMIERE_ANNEE', 'DEUXIEME_ANNEE'] as const;
 const STATUTS_DEMANDE = [
@@ -315,11 +316,41 @@ export class DemandesBourseService {
     return demande;
   }
 
-  async remove(id: string) {
+  async remove(id: string, rawReason: string, deletedById: string) {
+    const motif = requiredDeletionReason(rawReason);
     return this.prisma.$transaction(async (transaction) => {
       const demande = await transaction.demandeBourse.findUnique({
         where: { id },
-        select: { id: true },
+        include: {
+          personne: true,
+          typeBourse: { include: { echeances: true } },
+          inscriptions: {
+            include: {
+              personne: true,
+              elementsDossier: {
+                include: {
+                  elementRequis: true,
+                  elementSubstitutUtilise: true,
+                  paiements: { include: { echeance: true } },
+                },
+              },
+              paiements: { include: { echeance: true } },
+            },
+          },
+          elementsDossier: {
+            include: {
+              elementRequis: true,
+              elementSubstitutUtilise: true,
+              paiements: { include: { echeance: true } },
+            },
+          },
+          paiements: {
+            include: {
+              echeance: true,
+              elementDossier: { include: { elementRequis: true } },
+            },
+          },
+        },
       });
       if (!demande) {
         throw new NotFoundException('Demande de bourse introuvable');
@@ -338,6 +369,22 @@ export class DemandesBourseService {
         select: { id: true },
       });
       const elementIds = dossiers.map((element) => element.id);
+
+      const author = await transaction.utilisateur.findUnique({
+        where: { id: deletedById },
+        select: { id: true, nom: true, prenom: true },
+      });
+      await transaction.elementCorbeille.create({
+        data: {
+          type: 'DEMANDE_BOURSE',
+          entiteId: id,
+          libelle: `${demande.personne.prenom} ${demande.personne.nom} · ${demande.filiereSouhaitee}`,
+          motif,
+          supprimeParId: author?.id ?? deletedById,
+          supprimeParNom: [author?.prenom, author?.nom].filter(Boolean).join(' ') || 'Utilisateur inconnu',
+          donnees: toTrashSnapshot(demande),
+        },
+      });
 
       await transaction.paiement.deleteMany({
         where: {

@@ -15,6 +15,7 @@ import { TypesBourseModule } from './types-bourse/types-bourse.module';
 import { UtilisateursModule } from './utilisateurs/utilisateurs.module';
 import { CandidaturesPersonnelModule } from './candidatures-personnel/candidatures-personnel.module';
 import { IdempotencyInterceptor } from './idempotency/idempotency.interceptor';
+import { CorbeilleModule } from './corbeille/corbeille.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { IdempotencyInterceptor } from './idempotency/idempotency.interceptor';
     RapportsModule,
     TypesBourseModule,
     CandidaturesPersonnelModule,
+    CorbeilleModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor }],
