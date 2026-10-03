@@ -118,6 +118,7 @@ export class RapportsService {
         this.prisma.inscription.findMany({
           select: {
             id: true,
+            demandeBourseId: true,
             demandeBourse: {
               select: { typeBourse: { select: { id: true, nom: true } } },
             },
@@ -151,7 +152,7 @@ export class RapportsService {
 
     const inscriptionsParType = new Map<
       string,
-      { typeBourseId: string | null; typeBourse: string; total: number }
+      { typeBourseId: string | null; typeBourse: string; total: number; inscrits: number; acceptesEnAttente: number }
     >();
 
     for (const inscription of inscriptions) {
@@ -160,11 +161,37 @@ export class RapportsService {
       const existing = inscriptionsParType.get(key);
       if (existing) {
         existing.total += 1;
+        existing.inscrits += 1;
       } else {
         inscriptionsParType.set(key, {
           typeBourseId: typeBourse?.id ?? null,
           typeBourse: typeBourse?.nom ?? 'INSCRIPTION_DIRECTE',
           total: 1,
+          inscrits: 1,
+          acceptesEnAttente: 0,
+        });
+      }
+    }
+
+    const demandesDejaInscrites = new Set(
+      inscriptions.flatMap((inscription) => inscription.demandeBourseId ? [inscription.demandeBourseId] : []),
+    );
+    const demandesAcceptees = await this.prisma.demandeBourse.findMany({
+      where: { statut: 'ACCEPTEE', typeBourseId: { not: null } },
+      select: { id: true, typeBourseId: true, typeBourse: { select: { id: true, nom: true } } },
+    });
+    for (const demande of demandesAcceptees) {
+      if (demandesDejaInscrites.has(demande.id) || !demande.typeBourse) continue;
+      const existing = inscriptionsParType.get(demande.typeBourse.id);
+      if (existing) {
+        existing.acceptesEnAttente += 1;
+      } else {
+        inscriptionsParType.set(demande.typeBourse.id, {
+          typeBourseId: demande.typeBourse.id,
+          typeBourse: demande.typeBourse.nom,
+          total: 0,
+          inscrits: 0,
+          acceptesEnAttente: 1,
         });
       }
     }
@@ -235,6 +262,7 @@ export class RapportsService {
         nouveauxProspects: prospects.length,
       },
       paiements: paiements.map((item) => ({
+        id: item.id,
         date: item.datePaiement,
         personne: item.demandeBourse?.personne ?? item.inscription?.personne,
         type: item.typePaiement,
@@ -242,24 +270,122 @@ export class RapportsService {
         montant: this.money(Number(item.montant)),
       })),
       demandes: demandes.map((item) => ({
+        id: item.id,
         date: item.dateDepot,
         personne: item.personne,
         filiere: item.filiereSouhaitee,
         statut: item.statut,
       })),
       inscriptions: inscriptions.map((item) => ({
+        id: item.id,
         date: item.dateInscription,
         personne: item.personne,
         filiere: item.filiere,
         statut: item.statut,
       })),
       prospects: prospects.map((item) => ({
+        id: item.id,
         date: item.personne.dateEnregistrement,
         personne: item.personne,
         filiere: item.filiereSouhaitee,
         statut: item.statutRelance,
       })),
     };
+  }
+
+  async activiteJournee(date: string) {
+    const report = await this.activitePeriode({ dateDebut: date, dateFin: date });
+    const debut = this.parseDate(date, 'date');
+    const finExclusive = new Date(debut);
+    finExclusive.setUTCDate(finExclusive.getUTCDate() + 1);
+    const interval = { gte: debut, lt: finExclusive };
+    const [journal, candidatures] = await Promise.all([
+      this.prisma.journalActivite.findMany({
+        where: { date: interval },
+        orderBy: { date: 'desc' },
+      }),
+      this.prisma.candidaturePersonnel.findMany({
+        where: { dateDepot: interval },
+        select: { id: true, nom: true, prenom: true, fonction: true, dateDepot: true },
+        orderBy: { dateDepot: 'desc' },
+      }),
+    ]);
+
+    const loggedCreations = new Set(
+      journal.filter((event) => event.action.startsWith('Création ·')).flatMap((event) => event.entiteId ? [event.entiteId] : []),
+    );
+    type DailyActivity = {
+      id: string;
+      date: Date | string;
+      action: string;
+      detail: string;
+      utilisateur: string | null;
+      categorie: string;
+      montant?: string;
+    };
+    const activities: DailyActivity[] = journal.map((event) => ({
+      id: event.id,
+      date: event.date,
+      action: event.action,
+      detail: event.entiteId ? `${event.ressource} · ${event.entiteId.slice(0, 8)}` : event.ressource,
+      utilisateur: event.utilisateurNom,
+      categorie: event.ressource,
+    }));
+    const addCreation = (event: {
+      id: string;
+      date: Date | string;
+      action: string;
+      detail: string;
+      categorie: string;
+      montant?: string;
+    }) => {
+      if (loggedCreations.has(event.id)) return;
+      activities.push({ ...event, id: `${event.categorie}:${event.id}`, utilisateur: null });
+    };
+
+    for (const item of report.paiements) addCreation({
+      id: item.id,
+      date: item.date,
+      action: 'Paiement enregistré',
+      detail: `${item.personne?.prenom ?? ''} ${item.personne?.nom ?? ''} · ${item.dossier} · ${item.type}`.trim(),
+      categorie: 'Paiement',
+      montant: item.montant,
+    });
+    for (const item of report.demandes) addCreation({
+      id: item.id,
+      date: item.date,
+      action: 'Demande de bourse créée',
+      detail: `${item.personne.prenom} ${item.personne.nom} · ${item.filiere}`,
+      categorie: 'Demande de bourse',
+    });
+    for (const item of report.inscriptions) addCreation({
+      id: item.id,
+      date: item.date,
+      action: 'Inscription créée',
+      detail: `${item.personne.prenom} ${item.personne.nom} · ${item.filiere}`,
+      categorie: 'Inscription',
+    });
+    for (const item of report.prospects) addCreation({
+      id: item.id,
+      date: item.date,
+      action: 'Prospect créé',
+      detail: `${item.personne.prenom} ${item.personne.nom}${item.filiere ? ` · ${item.filiere}` : ''}`,
+      categorie: 'Prospect',
+    });
+    for (const item of candidatures) addCreation({
+      id: item.id,
+      date: item.dateDepot,
+      action: 'Candidature de recrutement déposée',
+      detail: `${item.prenom} ${item.nom} · ${item.fonction}`,
+      categorie: 'Recrutement',
+    });
+
+    activities.sort((first, second) => new Date(second.date).getTime() - new Date(first.date).getTime());
+    const parCategorie = activities.reduce<Record<string, number>>((counts, activity) => {
+      counts[activity.categorie] = (counts[activity.categorie] ?? 0) + 1;
+      return counts;
+    }, {});
+    return { date, total: activities.length, parCategorie, activites: activities };
   }
 
   private parseDate(value: string | undefined, field: string): Date {

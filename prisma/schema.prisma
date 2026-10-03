@@ -121,6 +121,20 @@ model IdempotencyRecord {
   @@map("idempotency_records")
 }
 
+model JournalActivite {
+  id             String   @id @default(uuid())
+  utilisateurId  String
+  utilisateurNom String
+  action         String
+  ressource      String
+  entiteId       String?
+  date           DateTime @default(now())
+
+  @@index([date])
+  @@index([utilisateurId, date])
+  @@map("journal_activite")
+}
+
 model ElementCorbeille {
   id             String   @id @default(uuid())
   type           String

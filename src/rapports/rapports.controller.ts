@@ -28,4 +28,9 @@ export class RapportsController {
   activitePeriode(@Query() periode: PeriodeRapportDto) {
     return this.rapportsService.activitePeriode(periode);
   }
+
+  @Get('activite-journee')
+  activiteJournee(@Query('date') date: string) {
+    return this.rapportsService.activiteJournee(date);
+  }
 }

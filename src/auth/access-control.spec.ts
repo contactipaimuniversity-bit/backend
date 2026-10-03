@@ -7,6 +7,12 @@ describe('requiredPermissionForRequest', () => {
     ]);
   });
 
+  it('uses dashboard access for the daily recap endpoint', () => {
+    expect(requiredPermissionForRequest('/rapports/activite-journee', 'GET')).toEqual([
+      'view:dashboard',
+    ]);
+  });
+
   it('allows certificate access to read dossier records without edit access', () => {
     expect(requiredPermissionForRequest('/inscriptions/123', 'GET')).toEqual([
       'view:enrollments',

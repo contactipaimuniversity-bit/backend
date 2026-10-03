@@ -28,6 +28,7 @@ export function requiredPermissionForRequest(
   const normalizedPath = path.split('?')[0].replace(/\/$/, '') || '/';
   const isRead = method.toUpperCase() === 'GET';
   if (normalizedPath === '/rapports/synthese') return ['view:dashboard'];
+  if (normalizedPath === '/rapports/activite-journee') return ['view:dashboard'];
   if (isRead && /^\/(demandes-bourse|inscriptions)\/[^/]+\/paiements$/.test(normalizedPath))
     return ['view:payments'];
   if (isRead && /^\/(demandes-bourse|inscriptions)\/[^/]+\/(finance|elements)$/.test(normalizedPath)) {

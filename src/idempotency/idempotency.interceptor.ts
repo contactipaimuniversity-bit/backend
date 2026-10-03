@@ -10,8 +10,9 @@ import { Request, Response } from 'express';
 import { createHash } from 'node:crypto';
 import { catchError, from, mergeMap, of, throwError } from 'rxjs';
 import { PrismaService } from '../prisma/prisma.service';
+import { describeActivity } from './activity-description';
 
-type AuthenticatedRequest = Request & { user?: { sub?: string } };
+type AuthenticatedRequest = Request & { user?: { sub?: string; nom?: string; prenom?: string } };
 
 @Injectable()
 export class IdempotencyInterceptor implements NestInterceptor {
@@ -22,7 +23,15 @@ export class IdempotencyInterceptor implements NestInterceptor {
     const request = http.getRequest<AuthenticatedRequest>();
     const key = request.get('idempotency-key');
     const userId = request.user?.sub;
-    if (request.method !== 'POST' || !key) return next.handle();
+    if (request.method !== 'POST' || !key) {
+      if (!userId || ['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) return next.handle();
+      return next.handle().pipe(
+        mergeMap(async (body: unknown) => {
+          await this.recordActivity(request, body);
+          return body;
+        }),
+      );
+    }
     if (!userId) throw new BadRequestException('Une session authentifiée est requise pour cette clé.');
 
     const requestHash = createHash('sha256')
@@ -53,11 +62,37 @@ export class IdempotencyInterceptor implements NestInterceptor {
                 completedAt: new Date(),
               },
             });
+            await this.recordActivity(request, body);
             return body;
           }),
         );
       }),
     );
+  }
+
+  private async recordActivity(request: AuthenticatedRequest, body: unknown) {
+    const userId = request.user?.sub;
+    if (!userId) return;
+    const routePath = typeof request.route?.path === 'string' ? request.route.path : request.path;
+    const route = `${request.baseUrl}${routePath}`;
+    const { action, ressource } = describeActivity(request.method, route);
+    const response = body && typeof body === 'object' && !Array.isArray(body)
+      ? body as { id?: unknown }
+      : null;
+    const parameterId = request.params?.id;
+    const entiteId = typeof response?.id === 'string'
+      ? response.id
+      : typeof parameterId === 'string'
+        ? parameterId
+        : null;
+    const utilisateurNom = [request.user?.prenom, request.user?.nom].filter(Boolean).join(' ') || userId;
+    try {
+      await this.prisma.journalActivite.create({
+        data: { utilisateurId: userId, utilisateurNom, action, ressource, entiteId },
+      });
+    } catch {
+      // Activity logging must never turn a successful business operation into an error.
+    }
   }
 
   private async reserve(userId: string, key: string, requestHash: string) {
