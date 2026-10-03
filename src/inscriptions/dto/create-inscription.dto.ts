@@ -9,4 +9,10 @@ export class CreateInscriptionDto {
   viaBourse?: boolean;
   demandeBourseId?: string;
   confirmerDemandeEnCours?: boolean;
+  preparation?: {
+    statuses?: Record<string, string>;
+    montant?: string | number;
+    typePaiement?: string;
+    elementId?: string;
+  };
 }

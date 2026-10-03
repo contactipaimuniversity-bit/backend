@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -36,6 +37,11 @@ export class DemandesBourseController {
   @Get()
   findAll(@Query() search: SearchDemandesBourseDto) {
     return this.demandesBourseService.findAll(search);
+  }
+
+  @Delete(':id')
+  remove(@Param('id') id: string) {
+    return this.demandesBourseService.remove(id);
   }
 
   @Get(':id/elements')

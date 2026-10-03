@@ -172,6 +172,8 @@ export class RapportsService {
     return {
       prospectsActifs,
       demandesEnCours,
+      demandesTotal: demandesDates.length,
+      effectifsTotal: demandesDates.length + inscriptions.length,
       inscriptionsTotal: inscriptions.length,
       inscriptionsParType: Array.from(inscriptionsParType.values()).sort(
         (first, second) => first.typeBourse.localeCompare(second.typeBourse),

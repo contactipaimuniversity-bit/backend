@@ -55,6 +55,40 @@ export class InscriptionsService {
     );
 
     return this.prisma.$transaction(async (transaction) => {
+      const catalogue = await transaction.elementRequis.findMany({
+        where: {
+          contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] },
+          niveauApplicable: this.niveauApplicable(niveau),
+        },
+      });
+      const statuses = createDto.preparation?.statuses ?? {};
+      const dossierElements = catalogue.map((element) => {
+        const requestedStatus = statuses[element.id];
+        if (requestedStatus !== undefined && typeof requestedStatus !== 'string') {
+          throw new BadRequestException('Le statut d une pièce est invalide');
+        }
+        const statut = requestedStatus === undefined
+          ? 'ATTENDU'
+          : this.parseElementStatut(requestedStatus);
+        if (statut === 'SUBSTITUE' && !element.elementSubstitutId) {
+          throw new BadRequestException(
+            `Aucun substitut n'est configure pour ${element.nom}`,
+          );
+        }
+        return {
+          elementRequisId: element.id,
+          montantAttendu: element.montantAttendu,
+          statut,
+          dateFourniture:
+            statut === 'FOURNI' || statut === 'SUBSTITUE' ? new Date() : null,
+          elementSubstitutUtiliseId:
+            statut === 'SUBSTITUE' ? element.elementSubstitutId : null,
+        };
+      });
+      const preparationPayment = this.prepareInitialPayment(
+        createDto.preparation,
+        catalogue,
+      );
       const resolvedPersonneId = nouvellePersonne
         ? (
             await transaction.personne.create({
@@ -77,14 +111,7 @@ export class InscriptionsService {
             })
           ).id
         : personneId!;
-      const catalogue = await transaction.elementRequis.findMany({
-        where: {
-          contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] },
-          niveauApplicable: this.niveauApplicable(niveau),
-        },
-      });
-
-      return transaction.inscription.create({
+      const inscription = await transaction.inscription.create({
         data: {
           personneId: resolvedPersonneId,
           anneeScolaire,
@@ -93,15 +120,85 @@ export class InscriptionsService {
           viaBourse,
           demandeBourseId,
           elementsDossier: {
-            create: catalogue.map((element) => ({
-              elementRequisId: element.id,
-              montantAttendu: element.montantAttendu,
-            })),
+            create: dossierElements,
           },
         },
         include: this.detailInclude(),
       });
+      if (preparationPayment) {
+        const element = inscription.elementsDossier.find(
+          (item) => item.elementRequisId === preparationPayment.elementId,
+        );
+        if (!element) {
+          throw new BadRequestException(
+            'La pièce choisie ne fait pas partie du dossier',
+          );
+        }
+        await transaction.paiement.create({
+          data: {
+            inscriptionId: inscription.id,
+            elementDossierId: element.id,
+            montant: preparationPayment.montant,
+            typePaiement: preparationPayment.typePaiement,
+          },
+        });
+        return transaction.inscription.findUnique({
+          where: { id: inscription.id },
+          include: this.detailInclude(),
+        });
+      }
+      return inscription;
     });
+  }
+
+  private prepareInitialPayment(
+    preparation: CreateInscriptionDto['preparation'],
+    catalogue: Array<{ id: string; montantAttendu: unknown }>,
+  ) {
+    const rawAmount = preparation?.montant;
+    const value = rawAmount === undefined || rawAmount === null
+      ? ''
+      : String(rawAmount).trim().replace(',', '.');
+    if (!value) return null;
+    if (!/^\d+(\.\d{1,2})?$/.test(value)) {
+      throw new BadRequestException(
+        'Le montant doit être un nombre positif avec au maximum deux décimales',
+      );
+    }
+    const amount = Number(value);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException('Le montant doit être strictement positif');
+    }
+    if (amount > 99_999_999.99) {
+      throw new BadRequestException('Le montant dépasse la limite autorisée');
+    }
+    const elementId = this.requiredString(preparation?.elementId, 'elementId');
+    const element = catalogue.find((item) => item.id === elementId);
+    if (!element || element.montantAttendu === null || element.montantAttendu === undefined) {
+      throw new BadRequestException(
+        'Choisissez une obligation financière valide pour ce paiement',
+      );
+    }
+    const expectedAmount = Number(element.montantAttendu);
+    if (!Number.isFinite(expectedAmount) || expectedAmount <= 0) {
+      throw new BadRequestException(
+        'Cette obligation ne possède pas de montant attendu valide',
+      );
+    }
+    if (amount > expectedAmount) {
+      throw new BadRequestException(
+        'Le paiement dépasse le montant attendu de cette obligation',
+      );
+    }
+    const typePaiement = preparation?.typePaiement?.trim().toUpperCase();
+    if (typePaiement !== 'FRAIS_DEPOT' && typePaiement !== 'FRAIS_INSCRIPTION') {
+      throw new BadRequestException('Le type de paiement est invalide');
+    }
+    return {
+      elementId,
+      montant: amount.toFixed(2),
+      typePaiement: typePaiement as 'FRAIS_DEPOT' | 'FRAIS_INSCRIPTION',
+    };
   }
 
   async findAll(search: SearchInscriptionsDto) {
@@ -112,6 +209,7 @@ export class InscriptionsService {
       anneeScolaire?: { contains: string; mode: 'insensitive' };
       niveau?: { contains: string; mode: 'insensitive' };
       statut?: StatutInscriptionValue;
+      demandeBourse?: { is: { typeBourseId: string } };
       OR?: Array<Record<string, unknown>>;
     } = {};
 
@@ -125,6 +223,9 @@ export class InscriptionsService {
     }
     if (search.statut) {
       where.statut = this.parseStatut(search.statut);
+    }
+    if (search.typeBourseId) {
+      where.demandeBourse = { is: { typeBourseId: search.typeBourseId } };
     }
 
     if (query) {
@@ -202,6 +303,36 @@ export class InscriptionsService {
       throw new NotFoundException('Inscription introuvable');
     }
     return inscription;
+  }
+
+  async remove(id: string) {
+    return this.prisma.$transaction(async (transaction) => {
+      const inscription = await transaction.inscription.findUnique({
+        where: { id },
+        select: { id: true },
+      });
+      if (!inscription) {
+        throw new NotFoundException('Inscription introuvable');
+      }
+
+      const elements = await transaction.elementDossier.findMany({
+        where: { inscriptionId: id },
+        select: { id: true },
+      });
+      await transaction.paiement.deleteMany({
+        where: {
+          OR: [
+            { inscriptionId: id },
+            { elementDossierId: { in: elements.map((element) => element.id) } },
+          ],
+        },
+      });
+      await transaction.elementDossier.deleteMany({
+        where: { inscriptionId: id },
+      });
+      await transaction.inscription.delete({ where: { id } });
+      return { id };
+    });
   }
 
   async update(id: string, updateDto: UpdateInscriptionDto) {

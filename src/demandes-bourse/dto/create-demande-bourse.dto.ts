@@ -7,4 +7,10 @@ export class CreateDemandeBourseDto {
   filiereSouhaitee!: string;
   filiereSecondaireSouhaitee?: string;
   ecoleOrigine?: string;
+  preparation?: {
+    statuses?: Record<string, string>;
+    montant?: string | number;
+    typePaiement?: string;
+    elementId?: string;
+  };
 }

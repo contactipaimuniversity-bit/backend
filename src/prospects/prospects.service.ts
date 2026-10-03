@@ -191,12 +191,12 @@ export class ProspectsService {
   }
 
   async update(id: string, updateDto: UpdateProspectDto) {
-    await this.ensureExists(id);
     const data: {
       filiereSouhaitee?: string | null;
       intention?: string | null;
       statutRelance?: StatutRelanceValue;
     } = {};
+    const personneData: Record<string, unknown> = {};
 
     if (updateDto.filiereSouhaitee !== undefined) {
       data.filiereSouhaitee = this.optionalString(updateDto.filiereSouhaitee);
@@ -207,15 +207,59 @@ export class ProspectsService {
     if (updateDto.statutRelance !== undefined) {
       data.statutRelance = this.parseStatut(updateDto.statutRelance);
     }
+    if (updateDto.nom !== undefined) {
+      personneData.nom = this.requiredString(updateDto.nom, 'nom');
+    }
+    if (updateDto.prenom !== undefined) {
+      personneData.prenom = this.requiredString(updateDto.prenom, 'prenom');
+    }
+    if (updateDto.telephone !== undefined) {
+      personneData.telephone = this.optionalString(updateDto.telephone);
+    }
+    if (updateDto.quartier !== undefined) {
+      personneData.quartier = this.optionalString(updateDto.quartier);
+    }
+    if (updateDto.dateNaissance !== undefined) {
+      personneData.dateNaissance = this.optionalDate(updateDto.dateNaissance, 'dateNaissance');
+    }
+    if (updateDto.lieuNaissance !== undefined) {
+      personneData.lieuNaissance = this.optionalString(updateDto.lieuNaissance);
+    }
+    if (updateDto.tuteurNom !== undefined) {
+      personneData.tuteurNom = this.optionalString(updateDto.tuteurNom);
+    }
+    if (updateDto.tuteurPrenom !== undefined) {
+      personneData.tuteurPrenom = this.optionalString(updateDto.tuteurPrenom);
+    }
+    if (updateDto.tuteurTelephone !== undefined) {
+      personneData.tuteurTelephone = this.optionalString(updateDto.tuteurTelephone);
+    }
 
-    if (Object.keys(data).length === 0) {
+    if (Object.keys(data).length === 0 && Object.keys(personneData).length === 0) {
       throw new BadRequestException('Aucune information a modifier');
     }
 
-    return this.prisma.prospect.update({
-      where: { id },
-      data,
-      include: { personne: true, themes: true },
+    return this.prisma.$transaction(async (transaction) => {
+      const prospect = await transaction.prospect.findUnique({
+        where: { id },
+        select: { id: true, personneId: true },
+      });
+      if (!prospect) {
+        throw new NotFoundException('Prospect introuvable');
+      }
+      if (Object.keys(personneData).length > 0) {
+        await transaction.personne.update({
+          where: { id: prospect.personneId },
+          data: personneData,
+        });
+      }
+      if (Object.keys(data).length > 0) {
+        await transaction.prospect.update({ where: { id }, data });
+      }
+      return transaction.prospect.findUnique({
+        where: { id },
+        include: { personne: true, themes: true },
+      });
     });
   }
 

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -35,6 +36,11 @@ export class InscriptionsController {
   @Get()
   findAll(@Query() search: SearchInscriptionsDto) {
     return this.inscriptionsService.findAll(search);
+  }
+
+  @Delete(':id')
+  remove(@Param('id') id: string) {
+    return this.inscriptionsService.remove(id);
   }
 
   @Get(':id/elements')
