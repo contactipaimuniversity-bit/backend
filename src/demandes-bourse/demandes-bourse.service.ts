@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -9,7 +10,12 @@ import { SearchDemandesBourseDto } from './dto/search-demandes-bourse.dto';
 import { UpdateDecisionDto } from './dto/update-decision.dto';
 import { UpdateElementDossierDto } from './dto/update-element-dossier.dto';
 import { UpdateEntretienDto } from './dto/update-entretien.dto';
-import { requiredDeletionReason, toTrashSnapshot } from '../corbeille/corbeille.utils';
+import {
+  requiredDeletionReason,
+  toTrashSnapshot,
+} from '../corbeille/corbeille.utils';
+import { parseDateOrder } from '../common/date-order';
+import { refuserSuppressionScolarite } from '../common/scolarite-guard';
 
 const NIVEAUX = ['PREMIERE_ANNEE', 'DEUXIEME_ANNEE'] as const;
 const STATUTS_DEMANDE = [
@@ -23,7 +29,6 @@ const STATUTS_ELEMENT = ['ATTENDU', 'FOURNI', 'MANQUANT', 'SUBSTITUE'] as const;
 
 type NiveauValue = (typeof NIVEAUX)[number];
 type StatutDemandeValue = (typeof STATUTS_DEMANDE)[number];
-type StatutElementValue = (typeof STATUTS_ELEMENT)[number];
 
 @Injectable()
 export class DemandesBourseService {
@@ -72,18 +77,22 @@ export class DemandesBourseService {
           niveauApplicable:
             niveauDemande === 'PREMIERE_ANNEE'
               ? { in: ['PREMIERE_ANNEE', 'TOUS'] }
-              : { in: ['DEUXIEME_ANNEE_PLUS', 'TOUS'] },
+              : { in: ['DEUXIEME_ANNEE', 'DEUXIEME_ANNEE_PLUS', 'TOUS'] },
         },
       });
       const statuses = createDto.preparation?.statuses ?? {};
       const dossierElements = catalogue.map((element) => {
         const requestedStatus = statuses[element.id];
-        if (requestedStatus !== undefined && typeof requestedStatus !== 'string') {
+        if (
+          requestedStatus !== undefined &&
+          typeof requestedStatus !== 'string'
+        ) {
           throw new BadRequestException('Le statut d une pièce est invalide');
         }
-        const statut = requestedStatus === undefined
-          ? 'ATTENDU'
-          : this.parseValue(requestedStatus, STATUTS_ELEMENT, 'statut');
+        const statut =
+          requestedStatus === undefined
+            ? 'ATTENDU'
+            : this.parseValue(requestedStatus, STATUTS_ELEMENT, 'statut');
         if (statut === 'SUBSTITUE' && !element.elementSubstitutId) {
           throw new BadRequestException(
             `Aucun substitut n'est configure pour ${element.nom}`,
@@ -115,10 +124,16 @@ export class DemandesBourseService {
                   nouvellePersonne.dateNaissance,
                   'dateNaissance',
                 ),
-                lieuNaissance: this.optionalString(nouvellePersonne.lieuNaissance),
+                lieuNaissance: this.optionalString(
+                  nouvellePersonne.lieuNaissance,
+                ),
                 tuteurNom: this.optionalString(nouvellePersonne.tuteurNom),
-                tuteurPrenom: this.optionalString(nouvellePersonne.tuteurPrenom),
-                tuteurTelephone: this.optionalString(nouvellePersonne.tuteurTelephone),
+                tuteurPrenom: this.optionalString(
+                  nouvellePersonne.tuteurPrenom,
+                ),
+                tuteurTelephone: this.optionalString(
+                  nouvellePersonne.tuteurTelephone,
+                ),
                 creeParId,
               },
               select: { id: true },
@@ -172,9 +187,10 @@ export class DemandesBourseService {
     catalogue: Array<{ id: string; montantAttendu: unknown }>,
   ) {
     const rawAmount = preparation?.montant;
-    const value = rawAmount === undefined || rawAmount === null
-      ? ''
-      : String(rawAmount).trim().replace(',', '.');
+    const value =
+      rawAmount === undefined || rawAmount === null
+        ? ''
+        : String(rawAmount).trim().replace(',', '.');
     if (!value) return null;
     if (!/^\d+(\.\d{1,2})?$/.test(value)) {
       throw new BadRequestException(
@@ -190,7 +206,11 @@ export class DemandesBourseService {
     }
     const elementId = this.requiredString(preparation?.elementId, 'elementId');
     const element = catalogue.find((item) => item.id === elementId);
-    if (!element || element.montantAttendu === null || element.montantAttendu === undefined) {
+    if (
+      !element ||
+      element.montantAttendu === null ||
+      element.montantAttendu === undefined
+    ) {
       throw new BadRequestException(
         'Choisissez une obligation financière valide pour ce paiement',
       );
@@ -206,24 +226,30 @@ export class DemandesBourseService {
         'Le paiement dépasse le montant attendu de cette obligation',
       );
     }
-    const typePaiement = preparation?.typePaiement?.trim().toUpperCase();
-    if (typePaiement !== 'FRAIS_DEPOT' && typePaiement !== 'FRAIS_INSCRIPTION') {
+    const requestedType = preparation?.typePaiement?.trim().toUpperCase();
+    if (
+      requestedType !== 'FRAIS_DEPOT' &&
+      requestedType !== 'FRAIS_INSCRIPTION'
+    ) {
       throw new BadRequestException('Le type de paiement est invalide');
     }
+    const typePaiement: 'FRAIS_DEPOT' | 'FRAIS_INSCRIPTION' = requestedType;
     return {
       elementId,
       montant: amount.toFixed(2),
-      typePaiement: typePaiement as 'FRAIS_DEPOT' | 'FRAIS_INSCRIPTION',
+      typePaiement,
     };
   }
 
   async findAll(search: SearchDemandesBourseDto) {
     const page = this.parsePagination(search.page, 1);
     const limit = this.parsePagination(search.limit, 20, 100);
+    const ordreDate = parseDateOrder(search.ordreDate);
     const query = search.q?.trim();
     const where: {
       statut?: StatutDemandeValue;
       niveauDemande?: NiveauValue;
+      typeBourseId?: string;
       OR?: Array<Record<string, unknown>>;
     } = {};
 
@@ -236,6 +262,11 @@ export class DemandesBourseService {
         NIVEAUX,
         'niveauDemande',
       );
+    }
+
+    const typeBourseId = this.optionalString(search.typeBourseId);
+    if (typeBourseId) {
+      where.typeBourseId = typeBourseId;
     }
 
     if (query) {
@@ -255,9 +286,16 @@ export class DemandesBourseService {
         include: {
           personne: true,
           typeBourse: true,
-          elementsDossier: { select: { statut: true, montantAttendu: true, paiements: { select: { montant: true } }, elementRequis: { select: { nom: true } } } },
+          elementsDossier: {
+            select: {
+              statut: true,
+              montantAttendu: true,
+              paiements: { select: { montant: true } },
+              elementRequis: { select: { nom: true } },
+            },
+          },
         },
-        orderBy: { dateDepot: 'desc' },
+        orderBy: [{ dateDepot: ordreDate }, { id: ordreDate }],
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -267,16 +305,34 @@ export class DemandesBourseService {
       data: data.map((demande) => ({
         ...demande,
         elementsManquants: demande.elementsDossier
-          .filter((element) => element.statut !== 'FOURNI' && element.statut !== 'SUBSTITUE')
+          .filter(
+            (element) =>
+              element.statut !== 'FOURNI' && element.statut !== 'SUBSTITUE',
+          )
           .map((element) => element.elementRequis.nom),
         obligationsImpayees: demande.elementsDossier.flatMap((element) => {
           if (element.montantAttendu === null) return [];
-          const reste = Number(element.montantAttendu) - element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
-          return reste > 0 ? [{ nom: element.elementRequis.nom, reste: this.money(reste) }] : [];
+          const reste =
+            Number(element.montantAttendu) -
+            element.paiements.reduce(
+              (total, paiement) => total + Number(paiement.montant),
+              0,
+            );
+          return reste > 0
+            ? [{ nom: element.elementRequis.nom, reste: this.money(reste) }]
+            : [];
         }),
         dossierComplet: demande.elementsDossier.every((element) => {
-          const documentComplet = element.statut === 'FOURNI' || element.statut === 'SUBSTITUE';
-          const reste = element.montantAttendu === null ? 0 : Number(element.montantAttendu) - element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+          const documentComplet =
+            element.statut === 'FOURNI' || element.statut === 'SUBSTITUE';
+          const reste =
+            element.montantAttendu === null
+              ? 0
+              : Number(element.montantAttendu) -
+                element.paiements.reduce(
+                  (total, paiement) => total + Number(paiement.montant),
+                  0,
+                );
           return documentComplet && reste <= 0;
         }),
       })),
@@ -356,6 +412,7 @@ export class DemandesBourseService {
         throw new NotFoundException('Demande de bourse introuvable');
       }
 
+      await refuserSuppressionScolarite(transaction, { demandeBourseId: id });
       const inscriptionIds = (
         await transaction.inscription.findMany({
           where: { demandeBourseId: id },
@@ -364,7 +421,10 @@ export class DemandesBourseService {
       ).map((inscription) => inscription.id);
       const dossiers = await transaction.elementDossier.findMany({
         where: {
-          OR: [{ demandeBourseId: id }, { inscriptionId: { in: inscriptionIds } }],
+          OR: [
+            { demandeBourseId: id },
+            { inscriptionId: { in: inscriptionIds } },
+          ],
         },
         select: { id: true },
       });
@@ -381,7 +441,9 @@ export class DemandesBourseService {
           libelle: `${demande.personne.prenom} ${demande.personne.nom} · ${demande.filiereSouhaitee}`,
           motif,
           supprimeParId: author?.id ?? deletedById,
-          supprimeParNom: [author?.prenom, author?.nom].filter(Boolean).join(' ') || 'Utilisateur inconnu',
+          supprimeParNom:
+            [author?.prenom, author?.nom].filter(Boolean).join(' ') ||
+            'Utilisateur inconnu',
           donnees: toTrashSnapshot(demande),
         },
       });
@@ -397,7 +459,10 @@ export class DemandesBourseService {
       });
       await transaction.elementDossier.deleteMany({
         where: {
-          OR: [{ demandeBourseId: id }, { inscriptionId: { in: inscriptionIds } }],
+          OR: [
+            { demandeBourseId: id },
+            { inscriptionId: { in: inscriptionIds } },
+          ],
         },
       });
       await transaction.inscription.deleteMany({
@@ -409,7 +474,18 @@ export class DemandesBourseService {
   }
 
   async updateEntretien(id: string, updateDto: UpdateEntretienDto) {
-    await this.ensureExists(id);
+    const current = await this.prisma.demandeBourse.findUnique({
+      where: { id },
+      select: { statut: true, dateEntretien: true },
+    });
+    if (!current) {
+      throw new NotFoundException('Demande de bourse introuvable');
+    }
+    if (current.statut === 'ACCEPTEE' || current.statut === 'REFUSEE') {
+      throw new ConflictException(
+        "L'entretien ne peut plus être modifié après la décision",
+      );
+    }
     const data: {
       dateEntretien?: Date | null;
       equipeEntretien?: string | null;
@@ -429,15 +505,22 @@ export class DemandesBourseService {
       throw new BadRequestException('Aucune information a modifier');
     }
 
-    if (data.dateEntretien || data.equipeEntretien) {
-      data.dateEntretien = data.dateEntretien ?? new Date();
-    }
+    const dateEntretien =
+      data.dateEntretien !== undefined
+        ? data.dateEntretien
+        : current.dateEntretien;
+    const statut =
+      current.statut === 'EN_DELIBERATION'
+        ? current.statut
+        : dateEntretien
+          ? 'ENTRETIEN_PROGRAMME'
+          : 'EN_ATTENTE';
 
     return this.prisma.demandeBourse.update({
       where: { id },
       data: {
         ...data,
-        statut: 'ENTRETIEN_PROGRAMME',
+        statut,
       },
       include: this.detailInclude(),
     });
@@ -505,7 +588,7 @@ export class DemandesBourseService {
           orderBy: { elementRequis: { nom: 'asc' } },
         },
         paiements: {
-          where: { elementDossierId: null },
+          where: { elementDossierId: null, echeanceId: null },
           include: { echeance: true },
           orderBy: { datePaiement: 'desc' },
         },

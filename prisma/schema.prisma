@@ -49,6 +49,7 @@ enum ContexteElement {
 
 enum NiveauApplicable {
   PREMIERE_ANNEE
+  DEUXIEME_ANNEE
   DEUXIEME_ANNEE_PLUS
   TOUS
 }
@@ -83,39 +84,40 @@ enum StatutElementPersonnel {
 // ---------- MODELES ----------
 
 model Utilisateur {
-  id         String @id @default(uuid())
-  nom        String
-  prenom     String?
-  email      String @unique
-  motDePasse String
-  role       String
-  posteId    String?
-  poste      Poste?  @relation(fields: [posteId], references: [id], onDelete: SetNull)
+  id          String   @id @default(uuid())
+  nom         String
+  prenom      String?
+  email       String   @unique
+  motDePasse  String
+  role        String
+  posteId     String?
+  poste       Poste?   @relation(fields: [posteId], references: [id], onDelete: SetNull)
   permissions String[] @default([])
 
-  personnesCreees Personne[]
+  personnesCreees   Personne[]
+  prospectsRelances ProspectRelance[]
 
   @@map("utilisateurs")
 }
 
 model Poste {
-  id          String   @id @default(uuid())
-  nom         String   @unique
-  permissions String[] @default([])
+  id           String        @id @default(uuid())
+  nom          String        @unique
+  permissions  String[]      @default([])
   utilisateurs Utilisateur[]
 
   @@map("postes")
 }
 
 model IdempotencyRecord {
-  id             String   @id @default(uuid())
+  id             String    @id @default(uuid())
   userId         String
   key            String
   requestHash    String
   responseBody   String?
   responseStatus Int?
   completedAt    DateTime?
-  createdAt      DateTime @default(now())
+  createdAt      DateTime  @default(now())
 
   @@unique([userId, key])
   @@map("idempotency_records")
@@ -129,22 +131,65 @@ model JournalActivite {
   ressource      String
   entiteId       String?
   date           DateTime @default(now())
+  // Détails d'audit : requête, résultat, valeurs envoyées et modifications.
+  methode        String?
+  chemin         String?
+  statutHttp     Int?
+  dureeMs        Int?
+  ip             String?
+  navigateur     String?
+  erreur         String?
+  donnees        Json?
+  modifications  Json?
 
   @@index([date])
   @@index([utilisateurId, date])
+  @@index([ressource, date])
   @@map("journal_activite")
 }
 
-model ElementCorbeille {
+// Temps passé par un utilisateur sur chaque écran (durée active, onglet visible).
+model JournalNavigation {
   id             String   @id @default(uuid())
+  utilisateurId  String
+  utilisateurNom String
+  page           String
+  titre          String
+  debut          DateTime
+  dureeMs        Int
+
+  @@index([debut])
+  @@index([utilisateurId, debut])
+  @@map("journal_navigation")
+}
+
+// Clics de l'utilisateur dans l'interface (libellé de l'élément, jamais de valeur saisie).
+model JournalInteraction {
+  id             String   @id @default(uuid())
+  utilisateurId  String
+  utilisateurNom String
+  page           String
+  titre          String
+  element        String
   type           String
-  entiteId       String
-  libelle        String
-  motif          String
-  supprimeParId  String?
-  supprimeParNom String
+  contexte       String?
+  date           DateTime
+
+  @@index([date])
+  @@index([utilisateurId, date])
+  @@map("journal_interactions")
+}
+
+model ElementCorbeille {
+  id              String   @id @default(uuid())
+  type            String
+  entiteId        String
+  libelle         String
+  motif           String
+  supprimeParId   String?
+  supprimeParNom  String
   dateSuppression DateTime @default(now())
-  donnees        Json
+  donnees         Json
 
   @@index([dateSuppression])
   @@index([type])
@@ -170,18 +215,25 @@ model Personne {
   demandesBourse DemandeBourse[]
   inscriptions   Inscription[]
 
+  // Numéro d'étudiant, attribué à la première affectation en classe.
+  matricule String? @unique
+  sexe      String?
+
   @@map("personnes")
 }
 
 model Prospect {
-  id               String        @id @default(uuid())
-  personneId       String        @unique
-  personne         Personne      @relation(fields: [personneId], references: [id])
-  filiereSouhaitee String?
-  intention        String?
-  statutRelance    StatutRelance @default(A_RELANCER)
+  id                 String        @id @default(uuid())
+  personneId         String        @unique
+  personne           Personne      @relation(fields: [personneId], references: [id])
+  filiereSouhaitee   String?
+  intention          String?
+  // Comment la personne a entendu parler de l'IPAIM.
+  sourceConnaissance String?
+  statutRelance      StatutRelance @default(A_RELANCER)
 
-  themes ThemeDiscussion[]
+  themes   ThemeDiscussion[]
+  relances ProspectRelance[]
 
   @@map("prospects")
 }
@@ -194,6 +246,23 @@ model ThemeDiscussion {
   date       DateTime @default(now())
 
   @@map("themes_discussion")
+}
+
+model ProspectRelance {
+  id                   String        @id @default(uuid())
+  prospectId           String
+  prospect             Prospect      @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+  utilisateurId        String?
+  utilisateur          Utilisateur?  @relation(fields: [utilisateurId], references: [id], onDelete: SetNull)
+  utilisateurNom       String
+  commentaire          String
+  intention            String?
+  statutRelance        StatutRelance
+  date                 DateTime      @default(now())
+  dateProchaineRelance DateTime?
+
+  @@index([prospectId, date])
+  @@map("prospect_relances")
 }
 
 model TypeBourse {
@@ -262,6 +331,12 @@ model Inscription {
   elementsDossier ElementDossier[]
   paiements       Paiement[]
 
+  classeId  String?
+  classe    Classe?                @relation(fields: [classeId], references: [id])
+  absences  AbsenceEtudiant[]
+  notes     Note[]
+  resultats ResultatDeliberation[]
+
   @@map("inscriptions")
 }
 
@@ -272,7 +347,7 @@ model ElementRequis {
   contexte           ContexteElement
   niveauApplicable   NiveauApplicable
   obligatoire        Boolean          @default(true)
-  montantAttendu    Decimal?         @db.Decimal(10, 2)
+  montantAttendu     Decimal?         @db.Decimal(10, 2)
   elementSubstitutId String?
   elementSubstitut   ElementRequis?   @relation("SubstitutionCatalogue", fields: [elementSubstitutId], references: [id])
   substituePour      ElementRequis[]  @relation("SubstitutionCatalogue")
@@ -304,35 +379,35 @@ model ElementDossier {
 }
 
 model Paiement {
-  id              String          @id @default(uuid())
-  demandeBourseId String?
-  demandeBourse   DemandeBourse?  @relation(fields: [demandeBourseId], references: [id])
-  inscriptionId   String?
-  inscription     Inscription?    @relation(fields: [inscriptionId], references: [id])
-  echeanceId      String?
-  echeance        EcheanceBourse? @relation(fields: [echeanceId], references: [id])
+  id               String          @id @default(uuid())
+  demandeBourseId  String?
+  demandeBourse    DemandeBourse?  @relation(fields: [demandeBourseId], references: [id])
+  inscriptionId    String?
+  inscription      Inscription?    @relation(fields: [inscriptionId], references: [id])
+  echeanceId       String?
+  echeance         EcheanceBourse? @relation(fields: [echeanceId], references: [id])
   elementDossierId String?
   elementDossier   ElementDossier? @relation(fields: [elementDossierId], references: [id])
-  montant         Decimal         @db.Decimal(10, 2)
-  datePaiement    DateTime        @default(now())
-  typePaiement    TypePaiement
+  montant          Decimal         @db.Decimal(10, 2)
+  datePaiement     DateTime        @default(now())
+  typePaiement     TypePaiement
 
   @@map("paiements")
 }
 
 model CandidaturePersonnel {
-  id               String                    @id @default(uuid())
-  nom              String
-  prenom           String
-  dateNaissance    DateTime?
-  diplome          String
-  fonction         String
-  quartier         String?
-  statut           StatutCandidaturePersonnel @default(DEPOSE)
-  dateEntretien    DateTime?
-  equipeEntretien  String?
-  remarques        String?
-  dateDepot        DateTime                  @default(now())
+  id              String                     @id @default(uuid())
+  nom             String
+  prenom          String
+  dateNaissance   DateTime?
+  diplome         String
+  fonction        String
+  quartier        String?
+  statut          StatutCandidaturePersonnel @default(DEPOSE)
+  dateEntretien   DateTime?
+  equipeEntretien String?
+  remarques       String?
+  dateDepot       DateTime                   @default(now())
 
   elementsDossier ElementPersonnel[]
 
@@ -340,13 +415,829 @@ model CandidaturePersonnel {
 }
 
 model ElementPersonnel {
-  id                    String                    @id @default(uuid())
+  id                     String                 @id @default(uuid())
   candidaturePersonnelId String
-  candidaturePersonnel  CandidaturePersonnel     @relation(fields: [candidaturePersonnelId], references: [id], onDelete: Cascade)
-  nom                   String
-  obligatoire            Boolean                   @default(true)
-  statut                StatutElementPersonnel    @default(ATTENDU)
-  dateFourniture        DateTime?
+  candidaturePersonnel   CandidaturePersonnel   @relation(fields: [candidaturePersonnelId], references: [id], onDelete: Cascade)
+  nom                    String
+  obligatoire            Boolean                @default(true)
+  statut                 StatutElementPersonnel @default(ATTENDU)
+  dateFourniture         DateTime?
 
   @@map("elements_personnel")
+}
+
+// ---------- DEPENSES ----------
+
+enum StatutDepense {
+  BROUILLON
+  SOUMISE
+  VALIDATION_FINALE
+  VALIDEE
+  RECEPTIONNEE
+  FACTUREE
+  PAYEE_PARTIELLEMENT
+  PAYEE
+  REJETEE
+  ANNULEE
+}
+
+enum TypePieceDepense {
+  LETTRE_DEMANDE
+  DEVIS
+  BON_LIVRAISON
+  FACTURE
+  PREUVE_PAIEMENT
+  AUTRE
+}
+
+enum ModeDecaissement {
+  ESPECES
+  MOBILE_MONEY
+  VIREMENT
+  CHEQUE
+}
+
+// Règles financières de l'établissement (ligne unique, id « finance »).
+model ParametresFinance {
+  id                    String  @id
+  seuilDoubleValidation Decimal @default(500000) @db.Decimal(12, 2)
+  budgetBloquant        Boolean @default(true)
+  // Le payeur ne peut pas être l'un des valideurs de la dépense.
+  separationPaiement    Boolean @default(true)
+
+  @@map("parametres_finance")
+}
+
+model CategorieDepense {
+  id               String  @id @default(uuid())
+  nom              String  @unique
+  // Achat de biens ou services : un bon de livraison est exigé avant la facture.
+  livraisonRequise Boolean @default(true)
+  actif            Boolean @default(true)
+
+  depenses Depense[]
+  budgets  LigneBudget[]
+
+  // Compte de charge utilisé pour les écritures comptables de la catégorie.
+  compteNumero String?
+
+  @@map("categories_depense")
+}
+
+model Fournisseur {
+  id                String  @id @default(uuid())
+  nom               String  @unique
+  telephone         String?
+  email             String?
+  adresse           String?
+  // Numéro d'identification fiscale ou registre de commerce.
+  identifiantFiscal String?
+  actif             Boolean @default(true)
+
+  depenses Depense[]
+
+  @@map("fournisseurs")
+}
+
+model ExerciceBudgetaire {
+  id        String   @id @default(uuid())
+  libelle   String   @unique
+  dateDebut DateTime
+  dateFin   DateTime
+  cloture   Boolean  @default(false)
+
+  budgets  LigneBudget[]
+  depenses Depense[]
+
+  @@map("exercices_budgetaires")
+}
+
+model LigneBudget {
+  id          String             @id @default(uuid())
+  exerciceId  String
+  exercice    ExerciceBudgetaire @relation(fields: [exerciceId], references: [id])
+  categorieId String
+  categorie   CategorieDepense   @relation(fields: [categorieId], references: [id])
+  montant     Decimal            @db.Decimal(12, 2)
+
+  @@unique([exerciceId, categorieId])
+  @@map("lignes_budget")
+}
+
+// Compteurs des numéros de pièces (demandes, bons de commande, décaissements).
+model SequenceNumero {
+  cle    String @id
+  valeur Int
+
+  @@map("sequences_numero")
+}
+
+model Depense {
+  id            String              @id @default(uuid())
+  numero        String              @unique
+  objet         String
+  justification String
+  categorieId   String
+  categorie     CategorieDepense    @relation(fields: [categorieId], references: [id])
+  fournisseurId String?
+  fournisseur   Fournisseur?        @relation(fields: [fournisseurId], references: [id])
+  exerciceId    String?
+  exercice      ExerciceBudgetaire? @relation(fields: [exerciceId], references: [id])
+  montant       Decimal             @db.Decimal(12, 2)
+  statut        StatutDepense       @default(BROUILLON)
+  // Nombre de validations exigées, figé à la soumission (1 ou 2).
+  niveauxRequis Int                 @default(1)
+  horsBudget    Boolean             @default(false)
+
+  initiateurId   String
+  initiateurNom  String
+  dateCreation   DateTime  @default(now())
+  dateSoumission DateTime?
+
+  validation1ParId  String?
+  validation1ParNom String?
+  dateValidation1   DateTime?
+  validation2ParId  String?
+  validation2ParNom String?
+  dateValidation2   DateTime?
+  motifRejet        String?
+  motifAnnulation   String?
+
+  numeroBonCommande String?   @unique
+  dateBonCommande   DateTime?
+
+  numeroBonLivraison   String?
+  dateReception        DateTime?
+  receptionParId       String?
+  receptionParNom      String?
+  receptionConforme    Boolean?
+  receptionCommentaire String?
+
+  numeroFacture  String?
+  dateFacture    DateTime?
+  montantFacture Decimal?  @db.Decimal(12, 2)
+  factureParId   String?
+  factureParNom  String?
+
+  lignes        DepenseLigne[]
+  pieces        DepensePiece[]
+  decaissements Decaissement[]
+  historique    DepenseHistorique[]
+
+  @@index([statut])
+  @@index([initiateurId])
+  @@index([exerciceId, categorieId])
+  @@map("depenses")
+}
+
+model DepenseLigne {
+  id           String  @id @default(uuid())
+  depenseId    String
+  depense      Depense @relation(fields: [depenseId], references: [id], onDelete: Cascade)
+  designation  String
+  quantite     Decimal @db.Decimal(12, 2)
+  prixUnitaire Decimal @db.Decimal(12, 2)
+  ordre        Int
+
+  @@map("depense_lignes")
+}
+
+model DepensePiece {
+  id            String           @id @default(uuid())
+  depenseId     String
+  depense       Depense          @relation(fields: [depenseId], references: [id], onDelete: Cascade)
+  type          TypePieceDepense
+  nom           String
+  url           String
+  publicId      String
+  typeRessource String
+  taille        Int
+  ajouteParId   String
+  ajouteParNom  String
+  date          DateTime         @default(now())
+
+  @@index([depenseId])
+  @@map("depense_pieces")
+}
+
+model Decaissement {
+  id           String           @id @default(uuid())
+  numero       String           @unique
+  depenseId    String
+  depense      Depense          @relation(fields: [depenseId], references: [id])
+  montant      Decimal          @db.Decimal(12, 2)
+  mode         ModeDecaissement
+  reference    String?
+  datePaiement DateTime
+  payeParId    String
+  payeParNom   String
+  dateSaisie   DateTime         @default(now())
+
+  @@index([depenseId])
+  @@index([datePaiement])
+  @@map("decaissements")
+}
+
+// Chaque étape du circuit : qui, quand, avec quel commentaire. Jamais modifié.
+model DepenseHistorique {
+  id             String        @id @default(uuid())
+  depenseId      String
+  depense        Depense       @relation(fields: [depenseId], references: [id], onDelete: Cascade)
+  action         String
+  statut         StatutDepense
+  utilisateurId  String
+  utilisateurNom String
+  commentaire    String?
+  date           DateTime      @default(now())
+
+  @@index([depenseId, date])
+  @@map("depense_historique")
+}
+
+// Historique des documents imprimés ou exportés en PDF : qui, quand, sur quel dossier.
+model Impression {
+  id             String   @id @default(uuid())
+  typeDocument   String
+  // IMPRESSION (boîte d'impression) ou PDF (fichier téléchargé).
+  mode           String
+  dossierType    String?
+  dossierId      String?
+  libelle        String
+  reference      String?
+  utilisateurId  String
+  utilisateurNom String
+  date           DateTime @default(now())
+
+  @@index([date])
+  @@index([utilisateurId, date])
+  @@index([dossierId])
+  @@map("impressions")
+}
+
+// ---------- ACADEMIQUE ----------
+
+// Règles de calcul des résultats (ligne unique, id « academique »).
+model ParametresAcademiques {
+  id                   String   @id
+  // Part du contrôle continu dans la moyenne d'une matière (le reste : examen).
+  poidsControleContinu Decimal  @default(40) @db.Decimal(5, 2)
+  moyenneValidation    Decimal  @default(10) @db.Decimal(4, 2)
+  // Sous cette note, la matière ne peut pas être compensée (vide : pas de note éliminatoire).
+  noteEliminatoire     Decimal? @db.Decimal(4, 2)
+  compensationSemestre Boolean  @default(true)
+  compensationAnnuelle Boolean  @default(true)
+  // Crédits minimum sur l'année pour passer en classe supérieure avec des dettes.
+  creditsPassage       Int      @default(45)
+  // Part d'heures d'absence non justifiée à partir de laquelle l'étudiant est signalé.
+  seuilAbsences        Decimal  @default(30) @db.Decimal(5, 2)
+  // Bulletins et relevés retenus tant que la scolarité n'est pas soldée.
+  blocageImpayes       Boolean  @default(false)
+
+  @@map("parametres_academiques")
+}
+
+model AnneeAcademique {
+  id        String   @id @default(uuid())
+  // Même libellé que l'année scolaire des inscriptions (ex. 2026-2027).
+  libelle   String   @unique
+  dateDebut DateTime
+  dateFin   DateTime
+  statut    String   @default("EN_COURS")
+
+  classes Classe[]
+
+  @@map("annees_academiques")
+}
+
+model Filiere {
+  id    String  @id @default(uuid())
+  code  String  @unique
+  nom   String  @unique
+  actif Boolean @default(true)
+
+  classes Classe[]
+  unites  UniteEnseignement[]
+
+  @@map("filieres")
+}
+
+model Salle {
+  id       String  @id @default(uuid())
+  nom      String  @unique
+  capacite Int?
+  actif    Boolean @default(true)
+
+  creneaux    Creneau[]
+  evaluations Evaluation[]
+
+  @@map("salles")
+}
+
+model Classe {
+  id                String          @id @default(uuid())
+  anneeAcademiqueId String
+  anneeAcademique   AnneeAcademique @relation(fields: [anneeAcademiqueId], references: [id])
+  filiereId         String
+  filiere           Filiere         @relation(fields: [filiereId], references: [id])
+  niveau            String
+  groupe            String          @default("A")
+  capacite          Int?
+
+  inscriptions  Inscription[]
+  cours         Cours[]
+  deliberations Deliberation[]
+
+  @@unique([anneeAcademiqueId, filiereId, niveau, groupe])
+  @@map("classes")
+}
+
+model UniteEnseignement {
+  id        String  @id @default(uuid())
+  filiereId String
+  filiere   Filiere @relation(fields: [filiereId], references: [id])
+  niveau    String
+  semestre  Int
+  code      String
+  nom       String
+  credits   Int
+  ordre     Int     @default(0)
+
+  matieres Matiere[]
+
+  @@unique([filiereId, niveau, code])
+  @@map("unites_enseignement")
+}
+
+model Matiere {
+  id            String            @id @default(uuid())
+  ueId          String
+  ue            UniteEnseignement @relation(fields: [ueId], references: [id])
+  code          String
+  nom           String
+  coefficient   Decimal           @default(1) @db.Decimal(4, 2)
+  volumeHoraire Int               @default(0)
+  actif         Boolean           @default(true)
+
+  cours Cours[]
+
+  @@unique([ueId, code])
+  @@map("matieres")
+}
+
+// Une matière enseignée à une classe par un enseignant.
+model Cours {
+  id           String   @id @default(uuid())
+  classeId     String
+  classe       Classe   @relation(fields: [classeId], references: [id])
+  matiereId    String
+  matiere      Matiere  @relation(fields: [matiereId], references: [id])
+  enseignantId String?
+  enseignant   Employe? @relation(fields: [enseignantId], references: [id])
+
+  creneaux    Creneau[]
+  seances     SeanceCours[]
+  evaluations Evaluation[]
+
+  @@unique([classeId, matiereId])
+  @@map("cours")
+}
+
+// Emploi du temps hebdomadaire.
+model Creneau {
+  id         String  @id @default(uuid())
+  coursId    String
+  cours      Cours   @relation(fields: [coursId], references: [id], onDelete: Cascade)
+  // 1 = lundi … 6 = samedi
+  jour       Int
+  heureDebut String
+  heureFin   String
+  salleId    String?
+  salle      Salle?  @relation(fields: [salleId], references: [id])
+
+  @@index([coursId])
+  @@map("creneaux")
+}
+
+// Séance réellement tenue : appel et cahier de textes. Sert aussi à la paie des vacataires.
+model SeanceCours {
+  id           String   @id @default(uuid())
+  coursId      String
+  cours        Cours    @relation(fields: [coursId], references: [id])
+  date         DateTime
+  heureDebut   String
+  dureeMinutes Int
+  contenu      String
+  enseignantId String?
+  enseignant   Employe? @relation(fields: [enseignantId], references: [id])
+  saisieParId  String
+  saisieParNom String
+  dateSaisie   DateTime @default(now())
+
+  absences AbsenceEtudiant[]
+
+  @@index([coursId, date])
+  @@index([enseignantId, date])
+  @@map("seances_cours")
+}
+
+model AbsenceEtudiant {
+  id            String      @id @default(uuid())
+  seanceId      String
+  seance        SeanceCours @relation(fields: [seanceId], references: [id], onDelete: Cascade)
+  inscriptionId String
+  inscription   Inscription @relation(fields: [inscriptionId], references: [id])
+  justifiee     Boolean     @default(false)
+  motif         String?
+
+  @@unique([seanceId, inscriptionId])
+  @@index([inscriptionId])
+  @@map("absences_etudiants")
+}
+
+model Evaluation {
+  id             String    @id @default(uuid())
+  coursId        String
+  cours          Cours     @relation(fields: [coursId], references: [id])
+  // CONTROLE, EXAMEN ou RATTRAPAGE
+  type           String
+  libelle        String
+  date           DateTime?
+  bareme         Decimal   @default(20) @db.Decimal(5, 2)
+  salleId        String?
+  salle          Salle?    @relation(fields: [salleId], references: [id])
+  surveillant    String?
+  // OUVERTE (saisie possible) ou VALIDEE (notes verrouillées)
+  statut         String    @default("OUVERTE")
+  valideParId    String?
+  valideParNom   String?
+  dateValidation DateTime?
+  // Copies corrigées sous numéro d'anonymat jusqu'à la validation.
+  anonyme        Boolean   @default(false)
+  creeParNom     String
+
+  notes Note[]
+
+  @@index([coursId])
+  @@map("evaluations")
+}
+
+model Note {
+  id             String      @id @default(uuid())
+  evaluationId   String
+  evaluation     Evaluation  @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  inscriptionId  String
+  inscription    Inscription @relation(fields: [inscriptionId], references: [id])
+  valeur         Decimal?    @db.Decimal(5, 2)
+  absent         Boolean     @default(false)
+  numeroAnonymat Int?
+  saisieParNom   String
+  dateSaisie     DateTime    @default(now())
+
+  @@unique([evaluationId, inscriptionId])
+  @@index([inscriptionId])
+  @@map("notes")
+}
+
+model Deliberation {
+  id            String    @id @default(uuid())
+  classeId      String
+  classe        Classe    @relation(fields: [classeId], references: [id])
+  // 1 ou 2 pour un semestre, 0 pour la délibération annuelle
+  semestre      Int
+  statut        String    @default("OUVERTE")
+  president     String?
+  membres       String?
+  observations  String?
+  ouverteParNom String
+  dateOuverture DateTime  @default(now())
+  clotureParId  String?
+  clotureParNom String?
+  dateCloture   DateTime?
+
+  resultats ResultatDeliberation[]
+
+  @@unique([classeId, semestre])
+  @@map("deliberations")
+}
+
+// Résultat figé à la clôture : il ne change plus, même si la maquette évolue.
+model ResultatDeliberation {
+  id             String       @id @default(uuid())
+  deliberationId String
+  deliberation   Deliberation @relation(fields: [deliberationId], references: [id], onDelete: Cascade)
+  inscriptionId  String
+  inscription    Inscription  @relation(fields: [inscriptionId], references: [id])
+  moyenne        Decimal?     @db.Decimal(5, 2)
+  creditsAcquis  Int
+  creditsTotal   Int
+  rang           Int?
+  mention        String?
+  decision       String
+  detail         Json
+
+  @@unique([deliberationId, inscriptionId])
+  @@index([inscriptionId])
+  @@map("resultats_deliberation")
+}
+
+// ---------- RESSOURCES HUMAINES ----------
+
+model ParametresRH {
+  id               String  @id
+  joursCongeAnnuel Int     @default(26)
+  // Diviseur du salaire mensuel pour valoriser une journée d'absence.
+  joursOuvresMois  Int     @default(26)
+  // Catégorie budgétaire sur laquelle la paie est imputée.
+  categoriePaieId  String?
+
+  @@map("parametres_rh")
+}
+
+model Employe {
+  id                  String    @id @default(uuid())
+  matricule           String    @unique
+  nom                 String
+  prenom              String
+  sexe                String?
+  dateNaissance       DateTime?
+  telephone           String?
+  email               String?
+  adresse             String?
+  // ENSEIGNANT_PERMANENT, ENSEIGNANT_VACATAIRE, ADMINISTRATIF ou TECHNIQUE
+  categorie           String
+  fonction            String
+  service             String?
+  dateEmbauche        DateTime
+  // ACTIF, SUSPENDU ou SORTI
+  statut              String    @default("ACTIF")
+  dateSortie          DateTime?
+  motifSortie         String?
+  numeroCnss          String?
+  modePaiement        String    @default("ESPECES")
+  coordonneesPaiement String?
+  // Dossier de recrutement d'origine et compte de connexion éventuels.
+  candidatureId       String?   @unique
+  utilisateurId       String?   @unique
+
+  contrats  Contrat[]
+  conges    Conge[]
+  absences  AbsencePersonnel[]
+  rubriques EmployeRubrique[]
+  bulletins BulletinPaie[]
+  cours     Cours[]
+  seances   SeanceCours[]
+
+  @@map("employes")
+}
+
+model Contrat {
+  id           String    @id @default(uuid())
+  employeId    String
+  employe      Employe   @relation(fields: [employeId], references: [id])
+  // CDI, CDD, VACATION ou STAGE
+  type         String
+  dateDebut    DateTime
+  dateFin      DateTime?
+  salaireBase  Decimal   @default(0) @db.Decimal(12, 2)
+  tauxHoraire  Decimal   @default(0) @db.Decimal(12, 2)
+  // ACTIF ou TERMINE
+  statut       String    @default("ACTIF")
+  motifFin     String?
+  creeParNom   String
+  dateCreation DateTime  @default(now())
+
+  @@index([employeId])
+  @@map("contrats")
+}
+
+model Conge {
+  id                  String    @id @default(uuid())
+  employeId           String
+  employe             Employe   @relation(fields: [employeId], references: [id])
+  // ANNUEL, MALADIE, MATERNITE, PERMISSION ou SANS_SOLDE
+  type                String
+  dateDebut           DateTime
+  dateFin             DateTime
+  jours               Int
+  motif               String?
+  // DEMANDE, APPROUVE, REFUSE ou ANNULE
+  statut              String    @default("DEMANDE")
+  demandeParId        String
+  demandeParNom       String
+  dateDemande         DateTime  @default(now())
+  decideParId         String?
+  decideParNom        String?
+  dateDecision        DateTime?
+  commentaireDecision String?
+
+  @@index([employeId, dateDebut])
+  @@map("conges")
+}
+
+model AbsencePersonnel {
+  id           String   @id @default(uuid())
+  employeId    String
+  employe      Employe  @relation(fields: [employeId], references: [id])
+  date         DateTime
+  jours        Decimal  @db.Decimal(4, 2)
+  justifiee    Boolean  @default(false)
+  motif        String?
+  saisieParNom String
+  dateSaisie   DateTime @default(now())
+
+  @@index([employeId, date])
+  @@map("absences_personnel")
+}
+
+// ---------- PAIE ----------
+
+model RubriquePaie {
+  id            String   @id @default(uuid())
+  code          String   @unique
+  libelle       String
+  // GAIN, RETENUE ou PATRONALE
+  type          String
+  // FIXE, POURCENTAGE_BASE, POURCENTAGE_BRUT ou VARIABLE (saisie chaque mois)
+  mode          String
+  valeur        Decimal  @default(0) @db.Decimal(14, 4)
+  // Assiette plafonnée pour les pourcentages (vide : pas de plafond).
+  plafond       Decimal? @db.Decimal(14, 2)
+  appliqueATous Boolean  @default(false)
+  compteNumero  String?
+  ordre         Int      @default(0)
+  actif         Boolean  @default(true)
+
+  employes EmployeRubrique[]
+
+  @@map("rubriques_paie")
+}
+
+// Valeur propre à un employé (prime fixe, taux particulier, retenue récurrente).
+model EmployeRubrique {
+  id         String       @id @default(uuid())
+  employeId  String
+  employe    Employe      @relation(fields: [employeId], references: [id])
+  rubriqueId String
+  rubrique   RubriquePaie @relation(fields: [rubriqueId], references: [id])
+  valeur     Decimal      @db.Decimal(14, 4)
+
+  @@unique([employeId, rubriqueId])
+  @@map("employe_rubriques")
+}
+
+model PeriodePaie {
+  id             String    @id @default(uuid())
+  annee          Int
+  mois           Int
+  // OUVERTE, VALIDEE ou PAYEE
+  statut         String    @default("OUVERTE")
+  prepareParId   String
+  prepareParNom  String
+  dateCreation   DateTime  @default(now())
+  valideParId    String?
+  valideParNom   String?
+  dateValidation DateTime?
+  payeParId      String?
+  payeParNom     String?
+  datePaiement   DateTime?
+  modePaiement   String?
+
+  bulletins BulletinPaie[]
+
+  @@unique([annee, mois])
+  @@map("periodes_paie")
+}
+
+model BulletinPaie {
+  id                String      @id @default(uuid())
+  numero            String      @unique
+  periodeId         String
+  periode           PeriodePaie @relation(fields: [periodeId], references: [id], onDelete: Cascade)
+  employeId         String
+  employe           Employe     @relation(fields: [employeId], references: [id])
+  categorie         String
+  fonction          String
+  salaireBase       Decimal     @db.Decimal(12, 2)
+  heuresVacation    Decimal     @default(0) @db.Decimal(8, 2)
+  tauxHoraire       Decimal     @default(0) @db.Decimal(12, 2)
+  joursAbsence      Decimal     @default(0) @db.Decimal(5, 2)
+  brut              Decimal     @db.Decimal(12, 2)
+  totalRetenues     Decimal     @db.Decimal(12, 2)
+  net               Decimal     @db.Decimal(12, 2)
+  chargesPatronales Decimal     @db.Decimal(12, 2)
+  lignes            Json
+  // Montants saisis à la main pour les rubriques variables : { CODE: montant }.
+  ajustements       Json        @default("{}")
+
+  @@unique([periodeId, employeId])
+  @@map("bulletins_paie")
+}
+
+// ---------- COMPTABILITE ----------
+
+model CompteComptable {
+  id      String  @id @default(uuid())
+  numero  String  @unique
+  libelle String
+  classe  Int
+  actif   Boolean @default(true)
+
+  lignes LigneEcriture[]
+
+  @@map("comptes_comptables")
+}
+
+model EcritureComptable {
+  id            String   @id @default(uuid())
+  numero        String   @unique
+  // CA caisse, BQ banque, MM mobile money, AC achats, VT produits, PA paie, OD opérations diverses
+  journal       String
+  date          DateTime
+  libelle       String
+  reference     String?
+  // MANUELLE, PAIEMENT, FACTURE_DEPENSE, DECAISSEMENT, PAIE, PAIE_PAIEMENT ou EXTOURNE
+  sourceType    String
+  sourceId      String?
+  exerciceId    String?
+  // BROUILLON (écriture manuelle à valider) ou VALIDEE (définitive)
+  statut        String   @default("VALIDEE")
+  // Écriture annulée par contre-passation : identifiant de l'écriture d'extourne.
+  extourneParId String?
+  creeParId     String?
+  creeParNom    String
+  dateSaisie    DateTime @default(now())
+  valideParNom  String?
+
+  lignes LigneEcriture[]
+
+  @@index([date])
+  @@index([journal, date])
+  @@index([sourceType, sourceId])
+  @@map("ecritures_comptables")
+}
+
+model LigneEcriture {
+  id         String            @id @default(uuid())
+  ecritureId String
+  ecriture   EcritureComptable @relation(fields: [ecritureId], references: [id], onDelete: Cascade)
+  compteId   String
+  compte     CompteComptable   @relation(fields: [compteId], references: [id])
+  libelle    String?
+  debit      Decimal           @default(0) @db.Decimal(14, 2)
+  credit     Decimal           @default(0) @db.Decimal(14, 2)
+
+  @@index([ecritureId])
+  @@index([compteId])
+  @@map("lignes_ecriture")
+}
+
+// ---------- ARCHIVAGE ET SAUVEGARDES ----------
+
+// Pièce numérisée rattachée à un dossier (étudiant, demande, inscription, employé).
+model DocumentArchive {
+  id               String   @id @default(uuid())
+  // PERSONNE, DEMANDE_BOURSE, INSCRIPTION ou EMPLOYE
+  cibleType        String
+  cibleId          String
+  // Pièce du dossier à laquelle le scan correspond, s'il y en a une.
+  elementDossierId String?
+  categorie        String
+  nom              String
+  url              String
+  publicId         String
+  typeRessource    String
+  taille           Int
+  ajouteParId      String
+  ajouteParNom     String
+  date             DateTime @default(now())
+
+  @@index([cibleType, cibleId])
+  @@index([elementDossierId])
+  @@map("documents_archives")
+}
+
+model Sauvegarde {
+  id                 String    @id @default(uuid())
+  fichier            String
+  taille             Int       @default(0)
+  tables             Int       @default(0)
+  lignes             Int       @default(0)
+  dureeMs            Int       @default(0)
+  // AUTO ou MANUEL
+  declenchement      String
+  // REUSSIE ou ECHEC
+  statut             String
+  erreur             String?
+  // Dernier test de restauration de ce fichier.
+  dateTest           DateTime?
+  resultatTest       String?
+  // Copie chiffrée déposée hors du serveur.
+  copieExterneLe     DateTime?
+  copieExterneRef    String?
+  copieExterneErreur String?
+  creeParNom         String
+  date               DateTime  @default(now())
+
+  @@index([date])
+  @@map("sauvegardes")
 }

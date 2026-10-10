@@ -1,11 +1,19 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  isForeignKeyViolation,
+  isUniqueConstraintViolation,
+} from '../common/prisma-errors';
 
 type SnapshotRecord = Record<string, unknown>;
 
 function snapshotRecord(value: unknown): SnapshotRecord {
   return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as SnapshotRecord
+    ? (value as SnapshotRecord)
     : {};
 }
 
@@ -14,7 +22,7 @@ function snapshotRecords(value: unknown): SnapshotRecord[] {
 }
 
 function stringValue(record: SnapshotRecord, key: string) {
-  return typeof record[key] === 'string' ? record[key] as string : '';
+  return typeof record[key] === 'string' ? record[key] : '';
 }
 
 function nullableString(record: SnapshotRecord, key: string) {
@@ -29,12 +37,19 @@ function nullableDate(record: SnapshotRecord, key: string) {
 
 function requiredDate(record: SnapshotRecord, key: string) {
   const value = nullableDate(record, key);
-  if (!value) throw new ConflictException(`La date archivée ${key} est invalide`);
+  if (!value)
+    throw new ConflictException(`La date archivée ${key} est invalide`);
   return value;
 }
 
 function uniqueRows(rows: SnapshotRecord[]) {
-  return [...new Map(rows.filter((row) => stringValue(row, 'id')).map((row) => [stringValue(row, 'id'), row])).values()];
+  return [
+    ...new Map(
+      rows
+        .filter((row) => stringValue(row, 'id'))
+        .map((row) => [stringValue(row, 'id'), row]),
+    ).values(),
+  ];
 }
 
 @Injectable()
@@ -58,8 +73,11 @@ export class CorbeilleService {
   }
 
   async findOne(id: string) {
-    const entry = await this.prisma.elementCorbeille.findUnique({ where: { id } });
-    if (!entry) throw new NotFoundException('Élément introuvable dans la corbeille');
+    const entry = await this.prisma.elementCorbeille.findUnique({
+      where: { id },
+    });
+    if (!entry)
+      throw new NotFoundException('Élément introuvable dans la corbeille');
     if (entry.type === 'UTILISATEUR') {
       const donnees = snapshotRecord(entry.donnees);
       delete donnees.motDePasse;
@@ -69,13 +87,41 @@ export class CorbeilleService {
   }
 
   async restore(id: string) {
+    try {
+      return await this.restoreEntry(id);
+    } catch (error) {
+      if (isForeignKeyViolation(error)) {
+        throw new ConflictException(
+          'Restauration impossible : un référentiel lié à cette archive (type de bourse, échéance ou élément requis) n’existe plus',
+        );
+      }
+      if (isUniqueConstraintViolation(error)) {
+        throw new ConflictException(
+          'Restauration impossible : un enregistrement identique existe déjà',
+        );
+      }
+      throw error;
+    }
+  }
+
+  private restoreEntry(id: string) {
     return this.prisma.$transaction(async (transaction) => {
-      const entry = await transaction.elementCorbeille.findUnique({ where: { id } });
-      if (!entry) throw new NotFoundException('Élément introuvable dans la corbeille');
+      const entry = await transaction.elementCorbeille.findUnique({
+        where: { id },
+      });
+      if (!entry)
+        throw new NotFoundException('Élément introuvable dans la corbeille');
       const data = snapshotRecord(entry.donnees);
 
       if (entry.type === 'UTILISATEUR') {
         const user = snapshotRecord(data);
+        const posteId = nullableString(user, 'posteId');
+        const poste = posteId
+          ? await transaction.poste.findUnique({
+              where: { id: posteId },
+              select: { id: true },
+            })
+          : null;
         await transaction.utilisateur.create({
           data: {
             id: stringValue(user, 'id'),
@@ -84,6 +130,13 @@ export class CorbeilleService {
             email: stringValue(user, 'email'),
             role: stringValue(user, 'role'),
             motDePasse: stringValue(user, 'motDePasse'),
+            posteId: poste?.id ?? null,
+            permissions: Array.isArray(user.permissions)
+              ? user.permissions.filter(
+                  (permission): permission is string =>
+                    typeof permission === 'string',
+                )
+              : [],
           } as never,
         });
       } else if (entry.type === 'PERSONNE') {
@@ -91,7 +144,10 @@ export class CorbeilleService {
         const personneId = stringValue(personne, 'id');
         const deletedBy = nullableString(personne, 'creeParId');
         const creator = deletedBy
-          ? await transaction.utilisateur.findUnique({ where: { id: deletedBy }, select: { id: true } })
+          ? await transaction.utilisateur.findUnique({
+              where: { id: deletedBy },
+              select: { id: true },
+            })
           : null;
         await transaction.personne.create({
           data: {
@@ -119,7 +175,12 @@ export class CorbeilleService {
               personneId,
               filiereSouhaitee: nullableString(prospect, 'filiereSouhaitee'),
               intention: nullableString(prospect, 'intention'),
-              statutRelance: stringValue(prospect, 'statutRelance') || 'A_RELANCER',
+              sourceConnaissance: nullableString(
+                prospect,
+                'sourceConnaissance',
+              ),
+              statutRelance:
+                stringValue(prospect, 'statutRelance') || 'A_RELANCER',
             } as never,
           });
           const themes = snapshotRecords(prospect.themes);
@@ -133,6 +194,45 @@ export class CorbeilleService {
               })) as never,
             });
           }
+          const relances = snapshotRecords(prospect.relances);
+          if (relances.length) {
+            const authorIds = [
+              ...new Set(
+                relances.flatMap((relance) => {
+                  const authorId = nullableString(relance, 'utilisateurId');
+                  return authorId ? [authorId] : [];
+                }),
+              ),
+            ];
+            const authors = new Set(
+              (
+                await transaction.utilisateur.findMany({
+                  where: { id: { in: authorIds } },
+                  select: { id: true },
+                })
+              ).map((author) => author.id),
+            );
+            await transaction.prospectRelance.createMany({
+              data: relances.map((relance) => {
+                const authorId = nullableString(relance, 'utilisateurId');
+                return {
+                  id: stringValue(relance, 'id'),
+                  prospectId,
+                  utilisateurId:
+                    authorId && authors.has(authorId) ? authorId : null,
+                  utilisateurNom: stringValue(relance, 'utilisateurNom'),
+                  commentaire: stringValue(relance, 'commentaire'),
+                  intention: nullableString(relance, 'intention'),
+                  statutRelance: stringValue(relance, 'statutRelance'),
+                  date: requiredDate(relance, 'date'),
+                  dateProchaineRelance: nullableDate(
+                    relance,
+                    'dateProchaineRelance',
+                  ),
+                };
+              }) as never,
+            });
+          }
         }
 
         const demandes = snapshotRecords(data.demandesBourse);
@@ -143,42 +243,88 @@ export class CorbeilleService {
         for (const inscription of inscriptions) {
           await this.restoreInscription(transaction, inscription, personneId);
         }
-        await this.restoreElements(transaction, snapshotRecords(data.elementsDossier));
-        await this.restorePaiements(transaction, snapshotRecords(data.paiements));
+        await this.restoreElements(
+          transaction,
+          snapshotRecords(data.elementsDossier),
+        );
+        await this.restorePaiements(
+          transaction,
+          snapshotRecords(data.paiements),
+        );
       } else if (entry.type === 'DEMANDE_BOURSE') {
         const demande = snapshotRecord(data);
         const personneId = stringValue(demande, 'personneId');
-        if (!await transaction.personne.findUnique({ where: { id: personneId }, select: { id: true } })) {
-          throw new ConflictException('Restaurez d’abord la personne liée à cette demande');
+        if (
+          !(await transaction.personne.findUnique({
+            where: { id: personneId },
+            select: { id: true },
+          }))
+        ) {
+          throw new ConflictException(
+            'Restaurez d’abord la personne liée à cette demande',
+          );
         }
         await this.restoreDemande(transaction, demande, personneId);
         const inscriptions = snapshotRecords(demande.inscriptions);
         for (const inscription of inscriptions) {
           await this.restoreInscription(transaction, inscription, personneId);
         }
-        await this.restoreElements(transaction, uniqueRows([
-          ...snapshotRecords(demande.elementsDossier),
-          ...inscriptions.flatMap((inscription) => snapshotRecords(inscription.elementsDossier)),
-        ]));
-        await this.restorePaiements(transaction, uniqueRows([
-          ...snapshotRecords(demande.paiements),
-          ...inscriptions.flatMap((inscription) => snapshotRecords(inscription.paiements)),
-        ]));
+        await this.restoreElements(
+          transaction,
+          uniqueRows([
+            ...snapshotRecords(demande.elementsDossier),
+            ...inscriptions.flatMap((inscription) =>
+              snapshotRecords(inscription.elementsDossier),
+            ),
+          ]),
+        );
+        await this.restorePaiements(
+          transaction,
+          uniqueRows([
+            ...snapshotRecords(demande.paiements),
+            ...inscriptions.flatMap((inscription) =>
+              snapshotRecords(inscription.paiements),
+            ),
+          ]),
+        );
       } else if (entry.type === 'INSCRIPTION') {
         const inscription = snapshotRecord(data);
         const personneId = stringValue(inscription, 'personneId');
-        if (!await transaction.personne.findUnique({ where: { id: personneId }, select: { id: true } })) {
-          throw new ConflictException('Restaurez d’abord la personne liée à cette inscription');
+        if (
+          !(await transaction.personne.findUnique({
+            where: { id: personneId },
+            select: { id: true },
+          }))
+        ) {
+          throw new ConflictException(
+            'Restaurez d’abord la personne liée à cette inscription',
+          );
         }
         const demandeBourseId = nullableString(inscription, 'demandeBourseId');
-        if (demandeBourseId && !await transaction.demandeBourse.findUnique({ where: { id: demandeBourseId }, select: { id: true } })) {
-          throw new ConflictException('Restaurez d’abord la demande de bourse liée à cette inscription');
+        if (
+          demandeBourseId &&
+          !(await transaction.demandeBourse.findUnique({
+            where: { id: demandeBourseId },
+            select: { id: true },
+          }))
+        ) {
+          throw new ConflictException(
+            'Restaurez d’abord la demande de bourse liée à cette inscription',
+          );
         }
         await this.restoreInscription(transaction, inscription, personneId);
-        await this.restoreElements(transaction, snapshotRecords(inscription.elementsDossier));
-        await this.restorePaiements(transaction, snapshotRecords(inscription.paiements));
+        await this.restoreElements(
+          transaction,
+          snapshotRecords(inscription.elementsDossier),
+        );
+        await this.restorePaiements(
+          transaction,
+          snapshotRecords(inscription.paiements),
+        );
       } else {
-        throw new ConflictException('Ce type d’archive ne peut pas être restauré');
+        throw new ConflictException(
+          'Ce type d’archive ne peut pas être restauré',
+        );
       }
 
       await transaction.elementCorbeille.delete({ where: { id } });
@@ -186,14 +332,21 @@ export class CorbeilleService {
     });
   }
 
-  private async restoreDemande(transaction: Parameters<Parameters<PrismaService['$transaction']>[0]>[0], demande: SnapshotRecord, personneId: string) {
+  private async restoreDemande(
+    transaction: Parameters<Parameters<PrismaService['$transaction']>[0]>[0],
+    demande: SnapshotRecord,
+    personneId: string,
+  ) {
     await transaction.demandeBourse.create({
       data: {
         id: stringValue(demande, 'id'),
         personneId,
         niveauDemande: stringValue(demande, 'niveauDemande'),
         filiereSouhaitee: stringValue(demande, 'filiereSouhaitee'),
-        filiereSecondaireSouhaitee: nullableString(demande, 'filiereSecondaireSouhaitee'),
+        filiereSecondaireSouhaitee: nullableString(
+          demande,
+          'filiereSecondaireSouhaitee',
+        ),
         ecoleOrigine: nullableString(demande, 'ecoleOrigine'),
         dateDepot: requiredDate(demande, 'dateDepot'),
         dateEntretien: nullableDate(demande, 'dateEntretien'),
@@ -205,7 +358,11 @@ export class CorbeilleService {
     });
   }
 
-  private async restoreInscription(transaction: Parameters<Parameters<PrismaService['$transaction']>[0]>[0], inscription: SnapshotRecord, personneId: string) {
+  private async restoreInscription(
+    transaction: Parameters<Parameters<PrismaService['$transaction']>[0]>[0],
+    inscription: SnapshotRecord,
+    personneId: string,
+  ) {
     await transaction.inscription.create({
       data: {
         id: stringValue(inscription, 'id'),
@@ -221,7 +378,10 @@ export class CorbeilleService {
     });
   }
 
-  private async restoreElements(transaction: Parameters<Parameters<PrismaService['$transaction']>[0]>[0], elements: SnapshotRecord[]) {
+  private async restoreElements(
+    transaction: Parameters<Parameters<PrismaService['$transaction']>[0]>[0],
+    elements: SnapshotRecord[],
+  ) {
     if (!elements.length) return;
     await transaction.elementDossier.createMany({
       data: elements.map((element) => ({
@@ -232,12 +392,18 @@ export class CorbeilleService {
         statut: stringValue(element, 'statut'),
         montantAttendu: element.montantAttendu ?? null,
         dateFourniture: nullableDate(element, 'dateFourniture'),
-        elementSubstitutUtiliseId: nullableString(element, 'elementSubstitutUtiliseId'),
+        elementSubstitutUtiliseId: nullableString(
+          element,
+          'elementSubstitutUtiliseId',
+        ),
       })) as never,
     });
   }
 
-  private async restorePaiements(transaction: Parameters<Parameters<PrismaService['$transaction']>[0]>[0], paiements: SnapshotRecord[]) {
+  private async restorePaiements(
+    transaction: Parameters<Parameters<PrismaService['$transaction']>[0]>[0],
+    paiements: SnapshotRecord[],
+  ) {
     if (!paiements.length) return;
     await transaction.paiement.createMany({
       data: paiements.map((payment) => ({
@@ -258,7 +424,8 @@ export class CorbeilleService {
       where: { id },
       select: { id: true },
     });
-    if (!entry) throw new NotFoundException('Élément introuvable dans la corbeille');
+    if (!entry)
+      throw new NotFoundException('Élément introuvable dans la corbeille');
     await this.prisma.elementCorbeille.delete({ where: { id } });
     return { id };
   }

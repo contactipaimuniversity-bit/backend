@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../build/e2e",
+    "rootDir": "..",
+    "incremental": false,
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["../src/**/*.ts", "../generated/**/*.ts", "./depenses.e2e-spec.ts", "./gestion.e2e-spec.ts"],
+  "exclude": ["../src/**/*.spec.ts"]
+}

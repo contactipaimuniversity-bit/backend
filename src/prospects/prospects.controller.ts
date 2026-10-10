@@ -9,17 +9,14 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Request } from 'express';
+import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateProspectDto } from './dto/create-prospect.dto';
+import { CreateProspectRelanceDto } from './dto/create-prospect-relance.dto';
 import { CreateThemeDto } from './dto/create-theme.dto';
 import { SearchProspectsDto } from './dto/search-prospects.dto';
 import { UpdateProspectDto } from './dto/update-prospect.dto';
 import { ProspectsService } from './prospects.service';
-
-type AuthenticatedRequest = Request & {
-  user: { sub: string };
-};
 
 @Controller('prospects')
 @UseGuards(JwtAuthGuard)
@@ -32,6 +29,20 @@ export class ProspectsController {
     @Req() request: AuthenticatedRequest,
   ) {
     return this.prospectsService.create(createDto, request.user.sub);
+  }
+
+  @Get(':id/relances')
+  findRelances(@Param('id') id: string) {
+    return this.prospectsService.findRelances(id);
+  }
+
+  @Post(':id/relances')
+  createRelance(
+    @Param('id') id: string,
+    @Body() createDto: CreateProspectRelanceDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.prospectsService.createRelance(id, createDto, request.user.sub);
   }
 
   @Get('a-relancer')

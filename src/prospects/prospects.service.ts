@@ -6,9 +6,12 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProspectDto } from './dto/create-prospect.dto';
+import { CreateProspectRelanceDto } from './dto/create-prospect-relance.dto';
 import { CreateThemeDto } from './dto/create-theme.dto';
 import { SearchProspectsDto } from './dto/search-prospects.dto';
 import { UpdateProspectDto } from './dto/update-prospect.dto';
+import { parseDateOrder } from '../common/date-order';
+import { Personne } from '../../generated/prisma/client';
 
 const STATUTS_RELANCE = [
   'A_RELANCER',
@@ -32,7 +35,7 @@ export class ProspectsService {
     const prenom = this.optionalString(createDto.prenom);
 
     const prospect = await this.prisma.$transaction(async (transaction) => {
-      let personne;
+      let personne: Personne | null;
 
       if (createDto.personneId) {
         personne = await transaction.personne.findUnique({
@@ -94,6 +97,7 @@ export class ProspectsService {
           personneId: personne.id,
           filiereSouhaitee: this.optionalString(createDto.filiereSouhaitee),
           intention: this.optionalString(createDto.intention),
+          sourceConnaissance: this.optionalString(createDto.sourceConnaissance),
           statutRelance,
         },
         include: {
@@ -110,6 +114,7 @@ export class ProspectsService {
     const page = this.parsePagination(search.page, 1);
     const limit = this.parsePagination(search.limit, 20, 100);
     const query = this.optionalString(search.q);
+    const ordreDate = parseDateOrder(search.ordreDate);
     const where: {
       statutRelance?: StatutRelanceValue;
       OR?: Array<Record<string, unknown>>;
@@ -132,8 +137,18 @@ export class ProspectsService {
       this.prisma.prospect.count({ where }),
       this.prisma.prospect.findMany({
         where,
-        include: { personne: true, themes: true },
-        orderBy: [{ personne: { nom: 'asc' } }, { personne: { prenom: 'asc' } }],
+        include: {
+          personne: true,
+          themes: true,
+          relances: {
+            orderBy: [{ date: 'desc' }, { id: 'desc' }],
+            take: 1,
+          },
+        },
+        orderBy: [
+          { personne: { dateEnregistrement: ordreDate } },
+          { id: ordreDate },
+        ],
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -157,7 +172,9 @@ export class ProspectsService {
   ): number {
     const parsed = Number(value ?? fallback);
     if (!Number.isInteger(parsed) || parsed < 1) {
-      throw new BadRequestException('Les paramètres de pagination sont invalides');
+      throw new BadRequestException(
+        'Les paramètres de pagination sont invalides',
+      );
     }
     return Math.min(parsed, maximum);
   }
@@ -165,12 +182,15 @@ export class ProspectsService {
   findToRelance() {
     return this.prisma.prospect.findMany({
       where: { statutRelance: 'A_RELANCER' },
-      include: { personne: true, themes: true },
-      orderBy: [
-        { intention: { sort: 'asc', nulls: 'last' } },
-        { personne: { nom: 'asc' } },
-        { personne: { prenom: 'asc' } },
-      ],
+      include: {
+        personne: true,
+        themes: true,
+        relances: {
+          orderBy: [{ date: 'desc' }, { id: 'desc' }],
+          take: 1,
+        },
+      },
+      orderBy: [{ personne: { dateEnregistrement: 'desc' } }, { id: 'desc' }],
     });
   }
 
@@ -180,6 +200,7 @@ export class ProspectsService {
       include: {
         personne: true,
         themes: { orderBy: { date: 'asc' } },
+        relances: { orderBy: [{ date: 'desc' }, { id: 'desc' }] },
       },
     });
 
@@ -190,10 +211,86 @@ export class ProspectsService {
     return prospect;
   }
 
+  async findRelances(id: string) {
+    await this.ensureExists(id);
+
+    return this.prisma.prospectRelance.findMany({
+      where: { prospectId: id },
+      orderBy: [{ date: 'desc' }, { id: 'desc' }],
+    });
+  }
+
+  async createRelance(
+    id: string,
+    createDto: CreateProspectRelanceDto,
+    utilisateurId: string,
+  ) {
+    const commentaire = this.requiredString(
+      createDto.commentaire,
+      'commentaire',
+    );
+    if (commentaire.length > 3000) {
+      throw new BadRequestException(
+        'commentaire ne doit pas depasser 3000 caracteres',
+      );
+    }
+
+    const intention = this.optionalString(createDto.intention);
+    const dateProchaineRelance = this.optionalDate(
+      createDto.dateProchaineRelance,
+      'dateProchaineRelance',
+    );
+
+    return this.prisma.$transaction(async (transaction) => {
+      const prospect = await transaction.prospect.findUnique({
+        where: { id },
+        select: { id: true, statutRelance: true },
+      });
+      if (!prospect) {
+        throw new NotFoundException('Prospect introuvable');
+      }
+
+      const utilisateur = await transaction.utilisateur.findUnique({
+        where: { id: utilisateurId },
+        select: { id: true, nom: true, prenom: true },
+      });
+      const statutRelance = createDto.statutRelance
+        ? this.parseStatut(createDto.statutRelance)
+        : prospect.statutRelance;
+      const utilisateurNom =
+        [utilisateur?.prenom, utilisateur?.nom].filter(Boolean).join(' ') ||
+        utilisateurId;
+
+      const relance = await transaction.prospectRelance.create({
+        data: {
+          prospectId: id,
+          utilisateurId: utilisateur?.id ?? null,
+          utilisateurNom,
+          commentaire,
+          intention,
+          statutRelance,
+          dateProchaineRelance,
+        },
+      });
+
+      await transaction.prospect.update({
+        where: { id },
+        data: {
+          statutRelance,
+          // Une relance sans intention ne doit pas effacer celle du prospect.
+          ...(createDto.intention !== undefined ? { intention } : {}),
+        },
+      });
+
+      return relance;
+    });
+  }
+
   async update(id: string, updateDto: UpdateProspectDto) {
     const data: {
       filiereSouhaitee?: string | null;
       intention?: string | null;
+      sourceConnaissance?: string | null;
       statutRelance?: StatutRelanceValue;
     } = {};
     const personneData: Record<string, unknown> = {};
@@ -203,6 +300,11 @@ export class ProspectsService {
     }
     if (updateDto.intention !== undefined) {
       data.intention = this.optionalString(updateDto.intention);
+    }
+    if (updateDto.sourceConnaissance !== undefined) {
+      data.sourceConnaissance = this.optionalString(
+        updateDto.sourceConnaissance,
+      );
     }
     if (updateDto.statutRelance !== undefined) {
       data.statutRelance = this.parseStatut(updateDto.statutRelance);
@@ -220,7 +322,10 @@ export class ProspectsService {
       personneData.quartier = this.optionalString(updateDto.quartier);
     }
     if (updateDto.dateNaissance !== undefined) {
-      personneData.dateNaissance = this.optionalDate(updateDto.dateNaissance, 'dateNaissance');
+      personneData.dateNaissance = this.optionalDate(
+        updateDto.dateNaissance,
+        'dateNaissance',
+      );
     }
     if (updateDto.lieuNaissance !== undefined) {
       personneData.lieuNaissance = this.optionalString(updateDto.lieuNaissance);
@@ -232,10 +337,15 @@ export class ProspectsService {
       personneData.tuteurPrenom = this.optionalString(updateDto.tuteurPrenom);
     }
     if (updateDto.tuteurTelephone !== undefined) {
-      personneData.tuteurTelephone = this.optionalString(updateDto.tuteurTelephone);
+      personneData.tuteurTelephone = this.optionalString(
+        updateDto.tuteurTelephone,
+      );
     }
 
-    if (Object.keys(data).length === 0 && Object.keys(personneData).length === 0) {
+    if (
+      Object.keys(data).length === 0 &&
+      Object.keys(personneData).length === 0
+    ) {
       throw new BadRequestException('Aucune information a modifier');
     }
 

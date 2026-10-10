@@ -16,6 +16,16 @@ import { UtilisateursModule } from './utilisateurs/utilisateurs.module';
 import { CandidaturesPersonnelModule } from './candidatures-personnel/candidatures-personnel.module';
 import { IdempotencyInterceptor } from './idempotency/idempotency.interceptor';
 import { CorbeilleModule } from './corbeille/corbeille.module';
+import { AuditModule } from './audit/audit.module';
+import { HealthModule } from './health/health.module';
+import { DepensesModule } from './depenses/depenses.module';
+import { ImpressionsModule } from './impressions/impressions.module';
+import { AcademiqueModule } from './academique/academique.module';
+import { RhModule } from './rh/rh.module';
+import { ComptabiliteModule } from './comptabilite/comptabilite.module';
+import { DocumentsModule } from './documents/documents.module';
+import { SauvegardesModule } from './sauvegardes/sauvegardes.module';
+import { AuditInterceptor } from './audit/audit.interceptor';
 
 @Module({
   imports: [
@@ -32,8 +42,22 @@ import { CorbeilleModule } from './corbeille/corbeille.module';
     TypesBourseModule,
     CandidaturesPersonnelModule,
     CorbeilleModule,
+    AuditModule,
+    HealthModule,
+    DepensesModule,
+    ImpressionsModule,
+    AcademiqueModule,
+    RhModule,
+    ComptabiliteModule,
+    DocumentsModule,
+    SauvegardesModule,
   ],
   controllers: [AppController],
-  providers: [AppService, { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor }],
+  providers: [
+    AppService,
+    // L'audit enveloppe l'idempotence : il voit le résultat final de chaque écriture.
+    { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+    { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },
+  ],
 })
 export class AppModule {}

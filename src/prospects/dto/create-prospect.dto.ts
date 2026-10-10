@@ -11,5 +11,6 @@ export class CreateProspectDto {
   tuteurTelephone?: string;
   filiereSouhaitee?: string;
   intention?: string;
+  sourceConnaissance?: string;
   statutRelance?: string;
 }

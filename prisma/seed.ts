@@ -64,11 +64,18 @@ async function main() {
       montantAttendu: null,
     },
     {
-      nom: "Frais d'inscription",
+      nom: "Frais d'inscription L1",
       categorie: $Enums.CategorieElement.FRAIS,
       contexte: $Enums.ContexteElement.INSCRIPTION_DIRECTE,
-      niveauApplicable: $Enums.NiveauApplicable.TOUS,
+      niveauApplicable: $Enums.NiveauApplicable.PREMIERE_ANNEE,
       montantAttendu: '30000.00',
+    },
+    {
+      nom: "Frais d'inscription L2",
+      categorie: $Enums.CategorieElement.FRAIS,
+      contexte: $Enums.ContexteElement.INSCRIPTION_DIRECTE,
+      niveauApplicable: $Enums.NiveauApplicable.DEUXIEME_ANNEE,
+      montantAttendu: '35000.00',
     },
     {
       nom: 'Paquet de feuilles rames',
@@ -101,14 +108,28 @@ async function main() {
   ];
 
   for (const item of catalog) {
+    const isLevelRegistrationFee =
+      item.categorie === $Enums.CategorieElement.FRAIS &&
+      item.contexte === $Enums.ContexteElement.INSCRIPTION_DIRECTE &&
+      (item.niveauApplicable === $Enums.NiveauApplicable.PREMIERE_ANNEE ||
+        item.niveauApplicable === $Enums.NiveauApplicable.DEUXIEME_ANNEE);
     const existing = await prisma.elementRequis.findFirst({
-      where: { nom: item.nom, contexte: item.contexte },
+      where: isLevelRegistrationFee
+        ? {
+            categorie: item.categorie,
+            contexte: item.contexte,
+            niveauApplicable: item.niveauApplicable,
+          }
+        : { nom: item.nom, contexte: item.contexte },
       select: { id: true },
     });
     if (!existing) {
       await prisma.elementRequis.create({ data: item });
-    } else {
-      await prisma.elementRequis.update({ where: { id: existing.id }, data: item });
+    } else if (!isLevelRegistrationFee) {
+      await prisma.elementRequis.update({
+        where: { id: existing.id },
+        data: item,
+      });
     }
   }
 

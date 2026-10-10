@@ -1,7 +1,4 @@
-import {
-  Injectable,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
@@ -27,7 +24,10 @@ export class AuthService {
       include: { poste: { select: { id: true, nom: true } } },
     });
 
-    if (!utilisateur || !(await bcrypt.compare(motDePasse, utilisateur.motDePasse))) {
+    if (
+      !utilisateur ||
+      !(await bcrypt.compare(motDePasse, utilisateur.motDePasse))
+    ) {
       throw new UnauthorizedException('Identifiants invalides');
     }
 
@@ -38,7 +38,9 @@ export class AuthService {
       prenom: utilisateur.prenom,
       role: utilisateur.role,
       posteId: utilisateur.posteId,
-      poste: utilisateur.poste ? { id: utilisateur.poste.id, nom: utilisateur.poste.nom } : null,
+      poste: utilisateur.poste
+        ? { id: utilisateur.poste.id, nom: utilisateur.poste.nom }
+        : null,
       permissions: utilisateur.permissions,
     };
 

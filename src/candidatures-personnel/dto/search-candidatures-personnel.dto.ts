@@ -3,4 +3,5 @@ export class SearchCandidaturesPersonnelDto {
   statut?: string;
   page?: string;
   limit?: string;
+  ordreDate?: string;
 }

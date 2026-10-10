@@ -4,10 +4,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { refuserSuppressionScolarite } from '../common/scolarite-guard';
 import { CreatePersonneDto } from './dto/create-personne.dto';
 import { SearchPersonnesDto } from './dto/search-personnes.dto';
 import { UpdatePersonneDto } from './dto/update-personne.dto';
-import { requiredDeletionReason, toTrashSnapshot } from '../corbeille/corbeille.utils';
+import {
+  requiredDeletionReason,
+  toTrashSnapshot,
+} from '../corbeille/corbeille.utils';
+import { parseDateOrder } from '../common/date-order';
 
 @Injectable()
 export class PersonnesService {
@@ -23,8 +28,12 @@ export class PersonnesService {
         prenom,
         telephone: this.optionalString(createDto.telephone),
         quartier: this.optionalString(createDto.quartier),
-        dateNaissance: this.optionalDate(createDto.dateNaissance, 'dateNaissance'),
+        dateNaissance: this.optionalDate(
+          createDto.dateNaissance,
+          'dateNaissance',
+        ),
         lieuNaissance: this.optionalString(createDto.lieuNaissance),
+        sexe: this.sexe(createDto.sexe),
         tuteurNom: this.optionalString(createDto.tuteurNom),
         tuteurPrenom: this.optionalString(createDto.tuteurPrenom),
         tuteurTelephone: this.optionalString(createDto.tuteurTelephone),
@@ -40,6 +49,7 @@ export class PersonnesService {
     const nom = this.optionalString(search.nom);
     const telephone = this.optionalString(search.telephone);
     const quartier = this.optionalString(search.quartier);
+    const ordreDate = parseDateOrder(search.ordreDate);
 
     const where: {
       OR?: Array<Record<string, unknown>>;
@@ -71,7 +81,7 @@ export class PersonnesService {
       this.prisma.personne.count({ where }),
       this.prisma.personne.findMany({
         where,
-        orderBy: [{ nom: 'asc' }, { prenom: 'asc' }],
+        orderBy: [{ dateEnregistrement: ordreDate }, { id: ordreDate }],
         select: this.personneSelect(),
         skip: (page - 1) * limit,
         take: limit,
@@ -96,7 +106,9 @@ export class PersonnesService {
   ): number {
     const parsed = Number(value ?? fallback);
     if (!Number.isInteger(parsed) || parsed < 1) {
-      throw new BadRequestException('Les paramètres de pagination sont invalides');
+      throw new BadRequestException(
+        'Les paramètres de pagination sont invalides',
+      );
     }
     return Math.min(parsed, maximum);
   }
@@ -153,6 +165,7 @@ export class PersonnesService {
     if (updateDto.lieuNaissance !== undefined) {
       data.lieuNaissance = this.optionalString(updateDto.lieuNaissance);
     }
+    if (updateDto.sexe !== undefined) data.sexe = this.sexe(updateDto.sexe);
     if (updateDto.tuteurNom !== undefined) {
       data.tuteurNom = this.optionalString(updateDto.tuteurNom);
     }
@@ -181,7 +194,7 @@ export class PersonnesService {
 
       const prospect = await transaction.prospect.findUnique({
         where: { personneId: id },
-        include: { themes: true },
+        include: { themes: true, relances: true },
       });
       const demandes = await transaction.demandeBourse.findMany({
         where: { personneId: id },
@@ -197,12 +210,12 @@ export class PersonnesService {
         },
       });
       const demandeIds = demandes.map((demande) => demande.id);
+      await refuserSuppressionScolarite(transaction, {
+        OR: [{ personneId: id }, { demandeBourseId: { in: demandeIds } }],
+      });
       const inscriptions = await transaction.inscription.findMany({
         where: {
-          OR: [
-            { personneId: id },
-            { demandeBourseId: { in: demandeIds } },
-          ],
+          OR: [{ personneId: id }, { demandeBourseId: { in: demandeIds } }],
         },
         include: {
           demandeBourse: { include: { typeBourse: true } },
@@ -238,7 +251,10 @@ export class PersonnesService {
             { elementDossierId: { in: elementIds } },
           ],
         },
-        include: { echeance: true, elementDossier: { include: { elementRequis: true } } },
+        include: {
+          echeance: true,
+          elementDossier: { include: { elementRequis: true } },
+        },
       });
       const author = await transaction.utilisateur.findUnique({
         where: { id: deletedById },
@@ -252,8 +268,17 @@ export class PersonnesService {
           libelle: `${personne.prenom} ${personne.nom}`,
           motif,
           supprimeParId: author?.id ?? deletedById,
-          supprimeParNom: [author?.prenom, author?.nom].filter(Boolean).join(' ') || 'Utilisateur inconnu',
-          donnees: toTrashSnapshot({ personne, prospect, demandesBourse: demandes, inscriptions, elementsDossier: elements, paiements }),
+          supprimeParNom:
+            [author?.prenom, author?.nom].filter(Boolean).join(' ') ||
+            'Utilisateur inconnu',
+          donnees: toTrashSnapshot({
+            personne,
+            prospect,
+            demandesBourse: demandes,
+            inscriptions,
+            elementsDossier: elements,
+            paiements,
+          }),
         },
       });
 
@@ -274,10 +299,16 @@ export class PersonnesService {
           ],
         },
       });
-      await transaction.inscription.deleteMany({ where: { id: { in: inscriptionIds } } });
-      await transaction.demandeBourse.deleteMany({ where: { id: { in: demandeIds } } });
+      await transaction.inscription.deleteMany({
+        where: { id: { in: inscriptionIds } },
+      });
+      await transaction.demandeBourse.deleteMany({
+        where: { id: { in: demandeIds } },
+      });
       if (prospect) {
-        await transaction.themeDiscussion.deleteMany({ where: { prospectId: prospect.id } });
+        await transaction.themeDiscussion.deleteMany({
+          where: { prospectId: prospect.id },
+        });
         await transaction.prospect.delete({ where: { id: prospect.id } });
       }
       await transaction.personne.delete({ where: { id } });
@@ -296,6 +327,8 @@ export class PersonnesService {
         quartier: true,
         dateNaissance: true,
         lieuNaissance: true,
+        sexe: true,
+        matricule: true,
         tuteurNom: true,
         tuteurPrenom: true,
         tuteurTelephone: true,
@@ -362,6 +395,10 @@ export class PersonnesService {
     return normalized;
   }
 
+  private sexe(value: string | null | undefined): string | null {
+    return value === 'M' || value === 'F' ? value : null;
+  }
+
   private optionalString(value: string | null | undefined): string | null {
     if (value === null || value === undefined) {
       return null;
@@ -396,6 +433,8 @@ export class PersonnesService {
       quartier: true,
       dateNaissance: true,
       lieuNaissance: true,
+      sexe: true,
+      matricule: true,
       tuteurNom: true,
       tuteurPrenom: true,
       tuteurTelephone: true,

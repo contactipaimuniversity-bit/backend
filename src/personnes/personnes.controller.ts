@@ -10,17 +10,13 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Request } from 'express';
+import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MotifSuppressionDto } from '../corbeille/dto/motif-suppression.dto';
 import { CreatePersonneDto } from './dto/create-personne.dto';
 import { SearchPersonnesDto } from './dto/search-personnes.dto';
 import { UpdatePersonneDto } from './dto/update-personne.dto';
 import { PersonnesService } from './personnes.service';
-
-type AuthenticatedRequest = Request & {
-  user: { sub: string };
-};
 
 @Controller('personnes')
 @UseGuards(JwtAuthGuard)

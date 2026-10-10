@@ -5,4 +5,5 @@ export class UpdateInscriptionDto {
   viaBourse?: boolean;
   demandeBourseId?: string | null;
   statut?: string;
+  confirmerDemandeEnCours?: boolean;
 }

@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateEcheanceDto } from './dto/create-echeance.dto';
 import { CreateTypeBourseDto } from './dto/create-type-bourse.dto';
 import { UpdateTypeBourseDto } from './dto/update-type-bourse.dto';
+import { isUniqueConstraintViolation } from '../common/prisma-errors';
 
 @Injectable()
 export class TypesBourseService {
@@ -84,6 +85,39 @@ export class TypesBourseService {
     return this.withScheduleMetadata(type);
   }
 
+  async remove(id: string) {
+    return this.prisma.$transaction(async (transaction) => {
+      const type = await transaction.typeBourse.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          demandesBourse: { select: { id: true }, take: 1 },
+          echeances: { select: { id: true } },
+        },
+      });
+      if (!type) {
+        throw new NotFoundException('Type de bourse introuvable');
+      }
+
+      const echeanceIds = type.echeances.map((echeance) => echeance.id);
+      const paiementCount = echeanceIds.length
+        ? await transaction.paiement.count({
+            where: { echeanceId: { in: echeanceIds } },
+          })
+        : 0;
+      if (type.demandesBourse.length > 0 || paiementCount > 0) {
+        throw new ConflictException(
+          'Ce type de bourse est déjà lié à des demandes ou paiements et ne peut pas être supprimé.',
+        );
+      }
+
+      await transaction.echeanceBourse.deleteMany({
+        where: { typeBourseId: id },
+      });
+      return transaction.typeBourse.delete({ where: { id } });
+    });
+  }
+
   async findEcheances(typeBourseId: string) {
     const type = await this.prisma.typeBourse.findUnique({
       where: { id: typeBourseId },
@@ -127,10 +161,10 @@ export class TypesBourseService {
       'montantAttendu',
       true,
     );
-      const dateEcheance = this.optionalDate(
-        createDto.dateEcheance,
-        'dateEcheance',
-      );
+    const dateEcheance = this.optionalDate(
+      createDto.dateEcheance,
+      'dateEcheance',
+    );
 
     try {
       const echeance = await this.prisma.echeanceBourse.create({
@@ -139,18 +173,13 @@ export class TypesBourseService {
           libelle,
           ordre,
           montantAttendu,
-            dateEcheance,
+          dateEcheance,
         },
       });
 
       return echeance;
     } catch (error) {
-      if (
-        error &&
-        typeof error === 'object' &&
-        'code' in error &&
-        error.code === 'P2002'
-      ) {
+      if (isUniqueConstraintViolation(error)) {
         throw new ConflictException(
           `L'ordre ${ordre} est deja utilise pour ce type de bourse`,
         );
@@ -159,19 +188,19 @@ export class TypesBourseService {
     }
   }
 
-    private optionalDate(
-      value: string | null | undefined,
-      field: string,
-    ): Date | null {
-      if (value === null || value === undefined || value.trim() === '') {
-        return null;
-      }
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) {
-        throw new BadRequestException(`${field} doit etre une date valide`);
-      }
-      return date;
+  private optionalDate(
+    value: string | null | undefined,
+    field: string,
+  ): Date | null {
+    if (value === null || value === undefined || value.trim() === '') {
+      return null;
     }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException(`${field} doit etre une date valide`);
+    }
+    return date;
+  }
   private async ensureExists(id: string): Promise<void> {
     const type = await this.prisma.typeBourse.findUnique({
       where: { id },
@@ -196,9 +225,9 @@ export class TypesBourseService {
     }
   }
 
-  private withScheduleMetadata<
-    T extends { nom: string; echeances: unknown[] },
-  >(type: T) {
+  private withScheduleMetadata<T extends { nom: string; echeances: unknown[] }>(
+    type: T,
+  ) {
     return {
       ...type,
       echeancesAttendues: this.expectedScheduleCount(type.nom),
@@ -261,11 +290,15 @@ export class TypesBourseService {
     }
 
     if (field === 'tauxReduction' && parsed > 100) {
-      throw new BadRequestException('tauxReduction doit etre compris entre 0 et 100');
+      throw new BadRequestException(
+        'tauxReduction doit etre compris entre 0 et 100',
+      );
     }
 
     if (!/^\d+(\.\d{1,2})?$/.test(String(value))) {
-      throw new BadRequestException(`${field} doit avoir au maximum 2 decimales`);
+      throw new BadRequestException(
+        `${field} doit avoir au maximum 2 decimales`,
+      );
     }
 
     return parsed.toFixed(2);

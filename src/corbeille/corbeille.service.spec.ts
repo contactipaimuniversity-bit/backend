@@ -26,7 +26,10 @@ describe('CorbeilleService', () => {
       utilisateur: { create: jest.fn().mockResolvedValue({ id: 'user-id' }) },
     };
     const prisma = {
-      $transaction: jest.fn((callback: (tx: typeof transaction) => Promise<unknown>) => callback(transaction)),
+      $transaction: jest.fn(
+        (callback: (tx: typeof transaction) => Promise<unknown>) =>
+          callback(transaction),
+      ),
     } as unknown as PrismaService;
     const service = new CorbeilleService(prisma);
 
@@ -34,10 +37,14 @@ describe('CorbeilleService', () => {
       id: 'trash-id',
       restaure: true,
     });
-    expect(transaction.utilisateur.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ motDePasse: 'stored-hash' }),
+    expect(transaction.utilisateur.create).toHaveBeenCalledTimes(1);
+    const [[createCall]] = transaction.utilisateur.create.mock.calls as [
+      [{ data: { motDePasse: string } }],
+    ];
+    expect(createCall.data).toMatchObject({ motDePasse: 'stored-hash' });
+    expect(transaction.elementCorbeille.delete).toHaveBeenCalledWith({
+      where: { id: 'trash-id' },
     });
-    expect(transaction.elementCorbeille.delete).toHaveBeenCalledWith({ where: { id: 'trash-id' } });
   });
 
   it('does not expose an archived account password hash in details', async () => {

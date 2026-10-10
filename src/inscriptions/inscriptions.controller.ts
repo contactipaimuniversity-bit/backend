@@ -10,7 +10,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Request } from 'express';
+import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MotifSuppressionDto } from '../corbeille/dto/motif-suppression.dto';
 import { CreateInscriptionDto } from './dto/create-inscription.dto';
@@ -18,8 +18,6 @@ import { SearchInscriptionsDto } from './dto/search-inscriptions.dto';
 import { UpdateInscriptionElementDto } from './dto/update-inscription-element.dto';
 import { UpdateInscriptionDto } from './dto/update-inscription.dto';
 import { InscriptionsService } from './inscriptions.service';
-
-type AuthenticatedRequest = Request & { user: { sub: string } };
 
 @Controller('inscriptions')
 @UseGuards(JwtAuthGuard)

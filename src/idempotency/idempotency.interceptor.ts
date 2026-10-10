@@ -10,12 +10,20 @@ import { Request, Response } from 'express';
 import { createHash } from 'node:crypto';
 import { catchError, from, mergeMap, of, throwError } from 'rxjs';
 import { PrismaService } from '../prisma/prisma.service';
-import { describeActivity } from './activity-description';
 
-type AuthenticatedRequest = Request & { user?: { sub?: string; nom?: string; prenom?: string } };
+type AuthenticatedRequest = Request & {
+  user?: { sub?: string };
+  idempotentReplay?: boolean;
+};
+
+const STALE_RESERVATION_MS = 2 * 60 * 1000;
+const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const PURGE_INTERVAL_MS = 60 * 60 * 1000;
 
 @Injectable()
 export class IdempotencyInterceptor implements NestInterceptor {
+  private lastPurgeAt = 0;
+
   constructor(private readonly prisma: PrismaService) {}
 
   intercept(context: ExecutionContext, next: CallHandler) {
@@ -23,16 +31,11 @@ export class IdempotencyInterceptor implements NestInterceptor {
     const request = http.getRequest<AuthenticatedRequest>();
     const key = request.get('idempotency-key');
     const userId = request.user?.sub;
-    if (request.method !== 'POST' || !key) {
-      if (!userId || ['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) return next.handle();
-      return next.handle().pipe(
-        mergeMap(async (body: unknown) => {
-          await this.recordActivity(request, body);
-          return body;
-        }),
+    if (request.method !== 'POST' || !key) return next.handle();
+    if (!userId)
+      throw new BadRequestException(
+        'Une session authentifiée est requise pour cette clé.',
       );
-    }
-    if (!userId) throw new BadRequestException('Une session authentifiée est requise pour cette clé.');
 
     const requestHash = createHash('sha256')
       .update(JSON.stringify(request.body ?? null))
@@ -42,15 +45,21 @@ export class IdempotencyInterceptor implements NestInterceptor {
     return from(this.reserve(userId, key, requestHash)).pipe(
       mergeMap(({ record, isNew }) => {
         if (record.responseStatus !== null && record.responseBody !== null) {
+          // Réponse rejouée : l'opération a déjà été journalisée la première fois.
+          request.idempotentReplay = true;
           response.status(record.responseStatus);
           return of(JSON.parse(record.responseBody) as unknown);
         }
         if (!isNew)
-          throw new ConflictException('La demande est déjà en cours. Réessayez dans un instant.');
+          throw new ConflictException(
+            'La demande est déjà en cours. Réessayez dans un instant.',
+          );
 
         return next.handle().pipe(
           catchError((error: unknown) => {
-            void this.prisma.idempotencyRecord.delete({ where: { id: record.id } }).catch(() => undefined);
+            void this.prisma.idempotencyRecord
+              .delete({ where: { id: record.id } })
+              .catch(() => undefined);
             return throwError(() => error);
           }),
           mergeMap(async (body: unknown) => {
@@ -62,7 +71,6 @@ export class IdempotencyInterceptor implements NestInterceptor {
                 completedAt: new Date(),
               },
             });
-            await this.recordActivity(request, body);
             return body;
           }),
         );
@@ -70,32 +78,18 @@ export class IdempotencyInterceptor implements NestInterceptor {
     );
   }
 
-  private async recordActivity(request: AuthenticatedRequest, body: unknown) {
-    const userId = request.user?.sub;
-    if (!userId) return;
-    const routePath = typeof request.route?.path === 'string' ? request.route.path : request.path;
-    const route = `${request.baseUrl}${routePath}`;
-    const { action, ressource } = describeActivity(request.method, route);
-    const response = body && typeof body === 'object' && !Array.isArray(body)
-      ? body as { id?: unknown }
-      : null;
-    const parameterId = request.params?.id;
-    const entiteId = typeof response?.id === 'string'
-      ? response.id
-      : typeof parameterId === 'string'
-        ? parameterId
-        : null;
-    const utilisateurNom = [request.user?.prenom, request.user?.nom].filter(Boolean).join(' ') || userId;
-    try {
-      await this.prisma.journalActivite.create({
-        data: { utilisateurId: userId, utilisateurNom, action, ressource, entiteId },
-      });
-    } catch {
-      // Activity logging must never turn a successful business operation into an error.
-    }
+  private async purgeExpired() {
+    if (Date.now() - this.lastPurgeAt < PURGE_INTERVAL_MS) return;
+    this.lastPurgeAt = Date.now();
+    await this.prisma.idempotencyRecord
+      .deleteMany({
+        where: { createdAt: { lt: new Date(Date.now() - RETENTION_MS) } },
+      })
+      .catch(() => undefined);
   }
 
   private async reserve(userId: string, key: string, requestHash: string) {
+    await this.purgeExpired();
     let record = await this.prisma.idempotencyRecord.findUnique({
       where: { userId_key: { userId, key } },
     });
@@ -113,9 +107,35 @@ export class IdempotencyInterceptor implements NestInterceptor {
         });
       }
     }
-    if (!record) throw new ConflictException('La demande est déjà en cours. Réessayez dans un instant.');
+    if (!record)
+      throw new ConflictException(
+        'La demande est déjà en cours. Réessayez dans un instant.',
+      );
+    // Une réservation jamais terminée (serveur interrompu en cours de
+    // traitement) est reprise au lieu de bloquer la clé indéfiniment.
+    if (
+      !isNew &&
+      record.completedAt === null &&
+      Date.now() - record.createdAt.getTime() > STALE_RESERVATION_MS
+    ) {
+      const now = new Date();
+      const taken = await this.prisma.idempotencyRecord.updateMany({
+        where: {
+          id: record.id,
+          completedAt: null,
+          createdAt: record.createdAt,
+        },
+        data: { requestHash, createdAt: now },
+      });
+      if (taken.count === 1) {
+        record = { ...record, requestHash, createdAt: now };
+        isNew = true;
+      }
+    }
     if (record.requestHash !== requestHash)
-      throw new ConflictException('Cette clé de synchronisation a déjà été utilisée pour une autre donnée.');
+      throw new ConflictException(
+        'Cette clé de synchronisation a déjà été utilisée pour une autre donnée.',
+      );
     return { record, isNew };
   }
 }

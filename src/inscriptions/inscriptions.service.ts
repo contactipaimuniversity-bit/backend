@@ -10,7 +10,12 @@ import { CreateInscriptionDto } from './dto/create-inscription.dto';
 import { SearchInscriptionsDto } from './dto/search-inscriptions.dto';
 import { UpdateInscriptionElementDto } from './dto/update-inscription-element.dto';
 import { UpdateInscriptionDto } from './dto/update-inscription.dto';
-import { requiredDeletionReason, toTrashSnapshot } from '../corbeille/corbeille.utils';
+import {
+  requiredDeletionReason,
+  toTrashSnapshot,
+} from '../corbeille/corbeille.utils';
+import { parseDateOrder } from '../common/date-order';
+import { refuserSuppressionScolarite } from '../common/scolarite-guard';
 
 const STATUTS_INSCRIPTION = ['EN_COURS', 'COMPLETE', 'ABANDONNEE'] as const;
 const STATUTS_ELEMENT = ['ATTENDU', 'FOURNI', 'MANQUANT', 'SUBSTITUE'] as const;
@@ -32,7 +37,7 @@ export class InscriptionsService {
     }
     const personneId = nouvellePersonne
       ? null
-      : this.requiredString(createDto.personneId, 'personneId');
+      : this.optionalString(createDto.personneId);
     const nomNouvellePersonne = nouvellePersonne
       ? this.requiredString(nouvellePersonne.nom, 'nom')
       : null;
@@ -43,13 +48,18 @@ export class InscriptionsService {
       createDto.anneeScolaire,
       'anneeScolaire',
     );
-    const niveau = this.requiredString(createDto.niveau, 'niveau');
+    const niveau = this.parseNiveau(createDto.niveau);
     const filiere = this.requiredString(createDto.filiere, 'filiere');
     const demandeBourseId = this.optionalString(createDto.demandeBourseId);
 
-    if (personneId) await this.ensurePersonne(personneId);
-    await this.ensureBourseCoherence(
-      personneId ?? '',
+    if (!nouvellePersonne && !viaBourse && !personneId) {
+      throw new BadRequestException(
+        'personneId est obligatoire pour une inscription directe',
+      );
+    }
+    if (personneId && !viaBourse) await this.ensurePersonne(personneId);
+    const personneBourseId = await this.ensureBourseCoherence(
+      personneId,
       viaBourse,
       demandeBourseId,
       createDto.confirmerDemandeEnCours === true,
@@ -65,12 +75,16 @@ export class InscriptionsService {
       const statuses = createDto.preparation?.statuses ?? {};
       const dossierElements = catalogue.map((element) => {
         const requestedStatus = statuses[element.id];
-        if (requestedStatus !== undefined && typeof requestedStatus !== 'string') {
+        if (
+          requestedStatus !== undefined &&
+          typeof requestedStatus !== 'string'
+        ) {
           throw new BadRequestException('Le statut d une pièce est invalide');
         }
-        const statut = requestedStatus === undefined
-          ? 'ATTENDU'
-          : this.parseElementStatut(requestedStatus);
+        const statut =
+          requestedStatus === undefined
+            ? 'ATTENDU'
+            : this.parseElementStatut(requestedStatus);
         if (statut === 'SUBSTITUE' && !element.elementSubstitutId) {
           throw new BadRequestException(
             `Aucun substitut n'est configure pour ${element.nom}`,
@@ -102,16 +116,24 @@ export class InscriptionsService {
                   nouvellePersonne.dateNaissance,
                   'dateNaissance',
                 ),
-                lieuNaissance: this.optionalString(nouvellePersonne.lieuNaissance),
+                lieuNaissance: this.optionalString(
+                  nouvellePersonne.lieuNaissance,
+                ),
                 tuteurNom: this.optionalString(nouvellePersonne.tuteurNom),
-                tuteurPrenom: this.optionalString(nouvellePersonne.tuteurPrenom),
-                tuteurTelephone: this.optionalString(nouvellePersonne.tuteurTelephone),
+                tuteurPrenom: this.optionalString(
+                  nouvellePersonne.tuteurPrenom,
+                ),
+                tuteurTelephone: this.optionalString(
+                  nouvellePersonne.tuteurTelephone,
+                ),
                 creeParId,
               },
               select: { id: true },
             })
           ).id
-        : personneId!;
+        : viaBourse
+          ? personneBourseId!
+          : personneId!;
       const inscription = await transaction.inscription.create({
         data: {
           personneId: resolvedPersonneId,
@@ -157,9 +179,10 @@ export class InscriptionsService {
     catalogue: Array<{ id: string; montantAttendu: unknown }>,
   ) {
     const rawAmount = preparation?.montant;
-    const value = rawAmount === undefined || rawAmount === null
-      ? ''
-      : String(rawAmount).trim().replace(',', '.');
+    const value =
+      rawAmount === undefined || rawAmount === null
+        ? ''
+        : String(rawAmount).trim().replace(',', '.');
     if (!value) return null;
     if (!/^\d+(\.\d{1,2})?$/.test(value)) {
       throw new BadRequestException(
@@ -175,7 +198,11 @@ export class InscriptionsService {
     }
     const elementId = this.requiredString(preparation?.elementId, 'elementId');
     const element = catalogue.find((item) => item.id === elementId);
-    if (!element || element.montantAttendu === null || element.montantAttendu === undefined) {
+    if (
+      !element ||
+      element.montantAttendu === null ||
+      element.montantAttendu === undefined
+    ) {
       throw new BadRequestException(
         'Choisissez une obligation financière valide pour ce paiement',
       );
@@ -192,19 +219,22 @@ export class InscriptionsService {
       );
     }
     const typePaiement = preparation?.typePaiement?.trim().toUpperCase();
-    if (typePaiement !== 'FRAIS_DEPOT' && typePaiement !== 'FRAIS_INSCRIPTION') {
-      throw new BadRequestException('Le type de paiement est invalide');
+    if (typePaiement !== 'FRAIS_INSCRIPTION') {
+      throw new BadRequestException(
+        "Une inscription ne peut être réglée qu'en frais d'inscription",
+      );
     }
     return {
       elementId,
       montant: amount.toFixed(2),
-      typePaiement: typePaiement as 'FRAIS_DEPOT' | 'FRAIS_INSCRIPTION',
+      typePaiement: 'FRAIS_INSCRIPTION' as const,
     };
   }
 
   async findAll(search: SearchInscriptionsDto) {
     const page = this.parsePagination(search.page, 1);
     const limit = this.parsePagination(search.limit, 20, 100);
+    const ordreDate = parseDateOrder(search.ordreDate);
     const query = this.optionalString(search.q);
     const where: {
       anneeScolaire?: { contains: string; mode: 'insensitive' };
@@ -247,9 +277,16 @@ export class InscriptionsService {
         include: {
           personne: true,
           demandeBourse: true,
-          elementsDossier: { select: { statut: true, montantAttendu: true, paiements: { select: { montant: true } }, elementRequis: { select: { nom: true } } } },
+          elementsDossier: {
+            select: {
+              statut: true,
+              montantAttendu: true,
+              paiements: { select: { montant: true } },
+              elementRequis: { select: { nom: true } },
+            },
+          },
         },
-        orderBy: { dateInscription: 'desc' },
+        orderBy: [{ dateInscription: ordreDate }, { id: ordreDate }],
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -259,16 +296,34 @@ export class InscriptionsService {
       data: data.map((inscription) => ({
         ...inscription,
         elementsManquants: inscription.elementsDossier
-          .filter((element) => element.statut !== 'FOURNI' && element.statut !== 'SUBSTITUE')
+          .filter(
+            (element) =>
+              element.statut !== 'FOURNI' && element.statut !== 'SUBSTITUE',
+          )
           .map((element) => element.elementRequis.nom),
         obligationsImpayees: inscription.elementsDossier.flatMap((element) => {
           if (element.montantAttendu === null) return [];
-          const reste = Number(element.montantAttendu) - element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
-          return reste > 0 ? [{ nom: element.elementRequis.nom, reste: reste.toFixed(2) }] : [];
+          const reste =
+            Number(element.montantAttendu) -
+            element.paiements.reduce(
+              (total, paiement) => total + Number(paiement.montant),
+              0,
+            );
+          return reste > 0
+            ? [{ nom: element.elementRequis.nom, reste: this.money(reste) }]
+            : [];
         }),
         dossierComplet: inscription.elementsDossier.every((element) => {
-          const documentComplet = element.statut === 'FOURNI' || element.statut === 'SUBSTITUE';
-          const reste = element.montantAttendu === null ? 0 : Number(element.montantAttendu) - element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+          const documentComplet =
+            element.statut === 'FOURNI' || element.statut === 'SUBSTITUE';
+          const reste =
+            element.montantAttendu === null
+              ? 0
+              : Number(element.montantAttendu) -
+                element.paiements.reduce(
+                  (total, paiement) => total + Number(paiement.montant),
+                  0,
+                );
           return documentComplet && reste <= 0;
         }),
       })),
@@ -309,11 +364,14 @@ export class InscriptionsService {
   async remove(id: string, rawReason: string, deletedById: string) {
     const motif = requiredDeletionReason(rawReason);
     return this.prisma.$transaction(async (transaction) => {
+      await refuserSuppressionScolarite(transaction, { id });
       const inscription = await transaction.inscription.findUnique({
         where: { id },
         include: {
           personne: true,
-          demandeBourse: { include: { typeBourse: { include: { echeances: true } } } },
+          demandeBourse: {
+            include: { typeBourse: { include: { echeances: true } } },
+          },
           elementsDossier: {
             include: {
               elementRequis: true,
@@ -348,7 +406,9 @@ export class InscriptionsService {
           libelle: `${inscription.personne.prenom} ${inscription.personne.nom} · ${inscription.filiere} · ${inscription.anneeScolaire}`,
           motif,
           supprimeParId: author?.id ?? deletedById,
-          supprimeParNom: [author?.prenom, author?.nom].filter(Boolean).join(' ') || 'Utilisateur inconnu',
+          supprimeParNom:
+            [author?.prenom, author?.nom].filter(Boolean).join(' ') ||
+            'Utilisateur inconnu',
           donnees: toTrashSnapshot(inscription),
         },
       });
@@ -392,7 +452,7 @@ export class InscriptionsService {
       );
     }
     if (updateDto.niveau !== undefined) {
-      data.niveau = this.requiredString(updateDto.niveau, 'niveau');
+      data.niveau = this.parseNiveau(updateDto.niveau);
     }
     if (updateDto.filiere !== undefined) {
       data.filiere = this.requiredString(updateDto.filiere, 'filiere');
@@ -407,14 +467,22 @@ export class InscriptionsService {
       data.statut = this.parseStatut(updateDto.statut);
     }
 
-    await this.ensureBourseCoherence(
-      current.personneId,
-      viaBourse,
-      demandeBourseId,
-    );
-
     if (Object.keys(data).length === 0) {
       throw new BadRequestException('Aucune information a modifier');
+    }
+
+    // Le lien avec la bourse n'est revalidé que s'il change : une demande déjà
+    // confirmée à la création ne doit pas bloquer les autres modifications.
+    if (
+      viaBourse !== current.viaBourse ||
+      demandeBourseId !== current.demandeBourseId
+    ) {
+      await this.ensureBourseCoherence(
+        current.personneId,
+        viaBourse,
+        demandeBourseId,
+        updateDto.confirmerDemandeEnCours === true,
+      );
     }
 
     return this.prisma.inscription.update({
@@ -449,13 +517,19 @@ export class InscriptionsService {
           include: { elementRequis: true, paiements: true },
           orderBy: { elementRequis: { nom: 'asc' } },
         },
-        paiements: { where: { elementDossierId: null }, select: { montant: true } },
+        paiements: {
+          where: { elementDossierId: null, echeanceId: null },
+          select: { montant: true },
+        },
       },
     });
     if (!inscription) throw new NotFoundException('Inscription introuvable');
     const obligations = inscription.elementsDossier.map((element) => {
       const montantAttendu = Number(element.montantAttendu ?? 0);
-      const montantPaye = element.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+      const montantPaye = element.paiements.reduce(
+        (total, paiement) => total + Number(paiement.montant),
+        0,
+      );
       return {
         id: element.id,
         nom: element.elementRequis.nom,
@@ -466,13 +540,26 @@ export class InscriptionsService {
         resteAPayer: this.money(Math.max(0, montantAttendu - montantPaye)),
       };
     });
-    const montantPayeNonAffecte = inscription.paiements.reduce((total, paiement) => total + Number(paiement.montant), 0);
+    const montantPayeNonAffecte = inscription.paiements.reduce(
+      (total, paiement) => total + Number(paiement.montant),
+      0,
+    );
     return {
       demandeId: id,
       obligations,
       montantPayeNonAffecte: this.money(montantPayeNonAffecte),
-      totalAttendu: this.money(obligations.reduce((total, obligation) => total + Number(obligation.montantAttendu), 0)),
-      totalPaye: this.money(obligations.reduce((total, obligation) => total + Number(obligation.montantPaye), 0) + montantPayeNonAffecte),
+      totalAttendu: this.money(
+        obligations.reduce(
+          (total, obligation) => total + Number(obligation.montantAttendu),
+          0,
+        ),
+      ),
+      totalPaye: this.money(
+        obligations.reduce(
+          (total, obligation) => total + Number(obligation.montantPaye),
+          0,
+        ) + montantPayeNonAffecte,
+      ),
     };
   }
 
@@ -564,18 +651,28 @@ export class InscriptionsService {
   private niveauApplicable(niveau: string): {
     in: $Enums.NiveauApplicable[];
   } {
-    const normalized = niveau.trim().toUpperCase();
-    return normalized.includes('PREMIERE') || normalized.includes('1')
+    return niveau === 'L1'
       ? { in: ['PREMIERE_ANNEE', 'TOUS'] }
-      : { in: ['DEUXIEME_ANNEE_PLUS', 'TOUS'] };
+      : { in: ['DEUXIEME_ANNEE', 'DEUXIEME_ANNEE_PLUS', 'TOUS'] };
+  }
+
+  private parseNiveau(value: string): 'L1' | 'L2' {
+    const normalized = this.requiredString(value, 'niveau')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+    if (['L1', '1', 'PREMIERE_ANNEE'].includes(normalized)) return 'L1';
+    if (['L2', '2', 'DEUXIEME_ANNEE'].includes(normalized)) return 'L2';
+    throw new BadRequestException('niveau doit etre L1 ou L2');
   }
 
   private async ensureBourseCoherence(
-    personneId: string,
+    personneId: string | null,
     viaBourse: boolean,
     demandeBourseId: string | null,
     confirmerDemandeEnCours = false,
-  ): Promise<void> {
+  ): Promise<string | null> {
     if (viaBourse && !demandeBourseId) {
       throw new BadRequestException(
         'demandeBourseId est obligatoire si viaBourse vaut true',
@@ -586,6 +683,7 @@ export class InscriptionsService {
         'demandeBourseId doit etre absent si viaBourse vaut false',
       );
     }
+    if (!demandeBourseId) return null;
     if (demandeBourseId) {
       const demande = await this.prisma.demandeBourse.findUnique({
         where: { id: demandeBourseId },
@@ -594,7 +692,7 @@ export class InscriptionsService {
       if (!demande) {
         throw new NotFoundException('Demande de bourse introuvable');
       }
-      if (demande.personneId !== personneId) {
+      if (personneId && demande.personneId !== personneId) {
         throw new BadRequestException(
           'La demande de bourse ne concerne pas cette personne',
         );
@@ -604,7 +702,9 @@ export class InscriptionsService {
           'La demande de bourse est encore en attente de décision. Confirmation requise.',
         );
       }
+      return demande.personneId;
     }
+    return null;
   }
 
   private async ensurePersonne(id: string): Promise<void> {
@@ -673,8 +773,12 @@ export class InscriptionsService {
     return normalized || null;
   }
 
-  private optionalDate(value: string | null | undefined, field: string): Date | null {
-    if (value === null || value === undefined || value.trim() === '') return null;
+  private optionalDate(
+    value: string | null | undefined,
+    field: string,
+  ): Date | null {
+    if (value === null || value === undefined || value.trim() === '')
+      return null;
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) {
       throw new BadRequestException(`${field} doit etre une date valide`);
@@ -683,6 +787,6 @@ export class InscriptionsService {
   }
 
   private money(value: number): string {
-    return value.toFixed(2);
+    return (Math.round((value + Number.EPSILON) * 100) / 100).toFixed(2);
   }
 }

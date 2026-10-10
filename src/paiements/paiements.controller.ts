@@ -5,6 +5,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -23,8 +24,8 @@ export class PaiementsController {
   }
 
   @Get('paiements')
-  findAll() {
-    return this.paiementsService.findAll();
+  findAll(@Query('ordreDate') ordreDate?: string) {
+    return this.paiementsService.findAll(ordreDate);
   }
 
   @Get('paiements/non-affectes')

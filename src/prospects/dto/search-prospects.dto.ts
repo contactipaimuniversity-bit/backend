@@ -3,4 +3,5 @@ export class SearchProspectsDto {
   statutRelance?: string;
   page?: string;
   limit?: string;
+  ordreDate?: string;
 }

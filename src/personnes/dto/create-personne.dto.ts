@@ -5,6 +5,7 @@ export class CreatePersonneDto {
   quartier?: string;
   dateNaissance?: string;
   lieuNaissance?: string;
+  sexe?: string | null;
   tuteurNom?: string;
   tuteurPrenom?: string;
   tuteurTelephone?: string;

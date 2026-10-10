@@ -9,9 +9,9 @@ describe('describeActivity', () => {
   });
 
   it('labels decisions and access changes clearly', () => {
-    expect(describeActivity('PATCH', '/demandes-bourse/:id/decision').action).toBe(
-      'Mise à jour d’une décision de bourse',
-    );
+    expect(
+      describeActivity('PATCH', '/demandes-bourse/:id/decision').action,
+    ).toBe('Mise à jour d’une décision de bourse');
     expect(describeActivity('PATCH', '/utilisateurs/:id/acces').action).toBe(
       'Modification des accès utilisateur',
     );

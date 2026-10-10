@@ -6,4 +6,5 @@ export class SearchInscriptionsDto {
   typeBourseId?: string;
   page?: string;
   limit?: string;
+  ordreDate?: string;
 }

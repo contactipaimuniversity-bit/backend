@@ -5,4 +5,5 @@ export class SearchPersonnesDto {
   quartier?: string;
   page?: string;
   limit?: string;
+  ordreDate?: string;
 }

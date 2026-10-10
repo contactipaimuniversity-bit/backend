@@ -10,7 +10,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { Request } from 'express';
+import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MotifSuppressionDto } from '../corbeille/dto/motif-suppression.dto';
 import { CreateDemandeBourseDto } from './dto/create-demande-bourse.dto';
@@ -19,8 +19,6 @@ import { UpdateDecisionDto } from './dto/update-decision.dto';
 import { UpdateElementDossierDto } from './dto/update-element-dossier.dto';
 import { UpdateEntretienDto } from './dto/update-entretien.dto';
 import { DemandesBourseService } from './demandes-bourse.service';
-
-type AuthenticatedRequest = Request & { user: { sub: string } };
 
 @Controller('demandes-bourse')
 @UseGuards(JwtAuthGuard)

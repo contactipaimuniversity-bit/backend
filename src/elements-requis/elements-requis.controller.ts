@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -8,7 +9,6 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { AdminGuard } from '../auth/guards/admin.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateElementRequisDto } from './dto/create-element-requis.dto';
 import { SearchElementsRequisDto } from './dto/search-elements-requis.dto';
@@ -26,14 +26,17 @@ export class ElementsRequisController {
   }
 
   @Post()
-  @UseGuards(AdminGuard)
   create(@Body() createDto: CreateElementRequisDto) {
     return this.elementsRequisService.create(createDto);
   }
 
   @Patch(':id')
-  @UseGuards(AdminGuard)
   update(@Param('id') id: string, @Body() updateDto: UpdateElementRequisDto) {
     return this.elementsRequisService.update(id, updateDto);
+  }
+
+  @Delete(':id')
+  remove(@Param('id') id: string) {
+    return this.elementsRequisService.remove(id);
   }
 }

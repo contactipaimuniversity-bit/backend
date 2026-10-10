@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { parseDateOrder } from '../common/date-order';
 import { CreatePaiementDto } from './dto/create-paiement.dto';
 
 const TYPES_PAIEMENT = [
@@ -30,7 +31,12 @@ export class PaiementsService {
     const elementDossier = elementDossierId
       ? await this.prisma.elementDossier.findUnique({
           where: { id: elementDossierId },
-          select: { id: true, demandeBourseId: true, inscriptionId: true },
+          select: {
+            id: true,
+            demandeBourseId: true,
+            inscriptionId: true,
+            montantAttendu: true,
+          },
         })
       : null;
     if (elementDossierId && !elementDossier) {
@@ -65,10 +71,28 @@ export class PaiementsService {
       );
     }
 
+    if (typePaiement === 'FRAIS_DEPOT' && resolvedInscriptionId) {
+      throw new BadRequestException(
+        'Une inscription ne peut pas recevoir de frais de dépôt',
+      );
+    }
     if (typePaiement === 'ECHEANCE_BOURSE' && !echeanceId) {
       throw new BadRequestException(
         'echeanceId est obligatoire pour un paiement echeance bourse',
       );
+    }
+    if (echeanceId && typePaiement !== 'ECHEANCE_BOURSE') {
+      throw new BadRequestException(
+        'Une echeance ne peut etre reglee que par un paiement echeance bourse',
+      );
+    }
+    if (echeanceId && elementDossierId) {
+      throw new BadRequestException(
+        'Un paiement concerne une echeance ou une obligation du dossier, pas les deux',
+      );
+    }
+    if (elementDossier) {
+      await this.ensureWithinRemaining(elementDossier, Number(montant));
     }
     if (echeanceId && !dossier.typeBourseId) {
       throw new BadRequestException(
@@ -121,7 +145,8 @@ export class PaiementsService {
     });
   }
 
-  async findAll() {
+  async findAll(rawDateOrder?: string) {
+    const ordreDate = parseDateOrder(rawDateOrder);
     const payments = await this.prisma.paiement.findMany({
       include: {
         demandeBourse: { include: { personne: true } },
@@ -129,7 +154,7 @@ export class PaiementsService {
         elementDossier: { include: { elementRequis: true } },
         echeance: true,
       },
-      orderBy: { datePaiement: 'desc' },
+      orderBy: [{ datePaiement: ordreDate }, { id: ordreDate }],
     });
     return payments.map((payment) => ({
       id: payment.id,
@@ -141,16 +166,17 @@ export class PaiementsService {
       dossier: payment.demandeBourse
         ? `Demande · ${payment.demandeBourse.filiereSouhaitee}`
         : `Inscription · ${payment.inscription?.filiere ?? '-'}`,
-      personne: payment.demandeBourse?.personne ?? payment.inscription?.personne,
+      personne:
+        payment.demandeBourse?.personne ?? payment.inscription?.personne,
       obligation: payment.elementDossier?.elementRequis.nom ?? null,
       echeance: payment.echeance?.libelle ?? null,
-      affecte: payment.elementDossier !== null,
+      affecte: payment.elementDossier !== null || payment.echeanceId !== null,
     }));
   }
 
   async findUnassigned() {
     const payments = await this.prisma.paiement.findMany({
-      where: { elementDossierId: null },
+      where: { elementDossierId: null, echeanceId: null },
       include: {
         demandeBourse: { include: { personne: true } },
         inscription: { include: { personne: true } },
@@ -176,6 +202,7 @@ export class PaiementsService {
         id: true,
         montant: true,
         elementDossierId: true,
+        echeanceId: true,
         demandeBourseId: true,
         inscriptionId: true,
       },
@@ -183,6 +210,11 @@ export class PaiementsService {
     if (!payment) throw new NotFoundException('Paiement introuvable');
     if (payment.elementDossierId) {
       throw new ConflictException('Ce paiement est deja affecte');
+    }
+    if (payment.echeanceId) {
+      throw new BadRequestException(
+        'Ce paiement regle une echeance de bourse et ne peut pas etre affecte a une obligation',
+      );
     }
 
     const obligation = await this.prisma.elementDossier.findUnique({
@@ -204,23 +236,7 @@ export class PaiementsService {
         'Cette obligation ne correspond pas au dossier du paiement',
       );
     }
-    if (!obligation.montantAttendu) {
-      throw new BadRequestException(
-        'Cette obligation ne possède pas de montant attendu',
-      );
-    }
-
-    const allocated = await this.prisma.paiement.aggregate({
-      where: { elementDossierId },
-      _sum: { montant: true },
-    });
-    const remaining =
-      Number(obligation.montantAttendu) - Number(allocated._sum.montant ?? 0);
-    if (Number(payment.montant) > remaining) {
-      throw new BadRequestException(
-        'Le paiement depasse le montant restant de cette obligation',
-      );
-    }
+    await this.ensureWithinRemaining(obligation, Number(payment.montant));
 
     const result = await this.prisma.paiement.updateMany({
       where: { id: paymentId, elementDossierId: null },
@@ -306,6 +322,29 @@ export class PaiementsService {
     };
   }
 
+  private async ensureWithinRemaining(
+    obligation: { id: string; montantAttendu: unknown },
+    montant: number,
+  ): Promise<void> {
+    if (!obligation.montantAttendu) {
+      throw new BadRequestException(
+        'Cette obligation ne possède pas de montant attendu',
+      );
+    }
+    const allocated = await this.prisma.paiement.aggregate({
+      where: { elementDossierId: obligation.id },
+      _sum: { montant: true },
+    });
+    const remaining = this.roundMoney(
+      Number(obligation.montantAttendu) - Number(allocated._sum.montant ?? 0),
+    );
+    if (montant > remaining) {
+      throw new BadRequestException(
+        'Le paiement depasse le montant restant de cette obligation',
+      );
+    }
+  }
+
   private async getDemandeDossier(id: string) {
     const demande = await this.prisma.demandeBourse.findUnique({
       where: { id },
@@ -351,14 +390,18 @@ export class PaiementsService {
     if (value === undefined || value === null || value === '') {
       throw new BadRequestException('montant est obligatoire');
     }
-    const parsed = Number(value);
+    const normalized = String(value).trim().replace(',', '.');
+    const parsed = Number(normalized);
     if (!Number.isFinite(parsed) || parsed <= 0) {
       throw new BadRequestException('montant doit etre strictement positif');
     }
-    if (!/^\d+(\.\d{1,2})?$/.test(String(value))) {
+    if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
       throw new BadRequestException(
         'montant doit avoir au maximum 2 decimales',
       );
+    }
+    if (parsed > 99_999_999.99) {
+      throw new BadRequestException('montant depasse la limite autorisee');
     }
     return parsed.toFixed(2);
   }

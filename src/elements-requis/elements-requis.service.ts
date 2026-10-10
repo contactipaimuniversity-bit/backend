@@ -1,9 +1,9 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { $Enums } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateElementRequisDto } from './dto/create-element-requis.dto';
 import { SearchElementsRequisDto } from './dto/search-elements-requis.dto';
@@ -13,6 +13,7 @@ const CATEGORIES = ['DOCUMENT', 'FOURNITURE', 'FRAIS'] as const;
 const CONTEXTES = ['BOURSE', 'INSCRIPTION_DIRECTE', 'TOUS'] as const;
 const NIVEAUX = [
   'PREMIERE_ANNEE',
+  'DEUXIEME_ANNEE',
   'DEUXIEME_ANNEE_PLUS',
   'TOUS',
 ] as const;
@@ -34,7 +35,8 @@ export class ElementsRequisService {
 
     if (search.contexte) {
       const contexte = this.parseValue(search.contexte, CONTEXTES, 'contexte');
-      where.contexte = contexte === 'TOUS' ? contexte : { in: [contexte, 'TOUS'] };
+      where.contexte =
+        contexte === 'TOUS' ? contexte : { in: [contexte, 'TOUS'] };
     }
     if (search.niveauApplicable) {
       const niveauApplicable = this.parseValue(
@@ -42,9 +44,12 @@ export class ElementsRequisService {
         NIVEAUX,
         'niveauApplicable',
       );
-      where.niveauApplicable = niveauApplicable === 'TOUS'
-        ? niveauApplicable
-        : { in: [niveauApplicable, 'TOUS'] };
+      where.niveauApplicable =
+        niveauApplicable === 'TOUS'
+          ? niveauApplicable
+          : niveauApplicable === 'DEUXIEME_ANNEE'
+            ? { in: ['DEUXIEME_ANNEE', 'DEUXIEME_ANNEE_PLUS', 'TOUS'] }
+            : { in: [niveauApplicable, 'TOUS'] };
     }
     if (search.categorie) {
       where.categorie = this.parseValue(
@@ -68,11 +73,7 @@ export class ElementsRequisService {
       CATEGORIES,
       'categorie',
     );
-    const contexte = this.parseValue(
-      createDto.contexte,
-      CONTEXTES,
-      'contexte',
-    );
+    const contexte = this.parseValue(createDto.contexte, CONTEXTES, 'contexte');
     const niveauApplicable = this.parseValue(
       createDto.niveauApplicable,
       NIVEAUX,
@@ -159,6 +160,39 @@ export class ElementsRequisService {
     });
   }
 
+  async remove(id: string) {
+    return this.prisma.$transaction(async (transaction) => {
+      const element = await transaction.elementRequis.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          _count: {
+            select: {
+              elementsDossier: true,
+              utiliseCommeSubstitutDans: true,
+              substituePour: true,
+            },
+          },
+        },
+      });
+      if (!element) {
+        throw new NotFoundException('Element requis introuvable');
+      }
+      const usage = element._count;
+      if (
+        usage.elementsDossier > 0 ||
+        usage.utiliseCommeSubstitutDans > 0 ||
+        usage.substituePour > 0
+      ) {
+        throw new ConflictException(
+          'Cet élément est déjà utilisé dans des dossiers ou comme substitut et ne peut pas être supprimé.',
+        );
+      }
+
+      return transaction.elementRequis.delete({ where: { id } });
+    });
+  }
+
   private async ensureExists(id: string): Promise<void> {
     const element = await this.prisma.elementRequis.findUnique({
       where: { id },
@@ -197,12 +231,12 @@ export class ElementsRequisService {
     field: string,
   ): T[number] {
     const normalized = value?.trim().toUpperCase();
-    if (!normalized || !allowed.includes(normalized as T[number])) {
+    if (!normalized || !allowed.includes(normalized)) {
       throw new BadRequestException(
         `${field} doit etre parmi: ${allowed.join(', ')}`,
       );
     }
-    return normalized as T[number];
+    return normalized;
   }
 
   private requiredString(value: string | undefined, field: string): string {
@@ -221,7 +255,9 @@ export class ElementsRequisService {
     return normalized || null;
   }
 
-  private optionalDecimal(value: string | number | null | undefined): string | null {
+  private optionalDecimal(
+    value: string | number | null | undefined,
+  ): string | null {
     if (value === null || value === undefined || value === '') {
       return null;
     }
@@ -230,7 +266,9 @@ export class ElementsRequisService {
       throw new BadRequestException('montantAttendu doit etre positif');
     }
     if (!/^\d+(\.\d{1,2})?$/.test(String(value))) {
-      throw new BadRequestException('montantAttendu doit avoir au maximum 2 decimales');
+      throw new BadRequestException(
+        'montantAttendu doit avoir au maximum 2 decimales',
+      );
     }
     return parsed.toFixed(2);
   }
