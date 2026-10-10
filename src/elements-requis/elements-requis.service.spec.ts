@@ -25,27 +25,35 @@ describe('ElementsRequisService.findAll', () => {
           in: ['DEUXIEME_ANNEE', 'DEUXIEME_ANNEE_PLUS', 'TOUS'],
         },
       },
-      include: { elementSubstitut: true },
+      include: {
+        elementSubstitut: true,
+        _count: { select: { elementsDossier: true } },
+      },
       orderBy: [{ categorie: 'asc' }, { nom: 'asc' }],
     });
   });
 });
 
 describe('ElementsRequisService.remove', () => {
-  it('refuses to delete an element already copied into dossier records', async () => {
-    const deleteElement = jest.fn();
+  const setup = () => {
     const transaction = {
       elementRequis: {
         findUnique: jest.fn().mockResolvedValue({
           id: 'element-id',
-          _count: {
-            elementsDossier: 1,
-            utiliseCommeSubstitutDans: 0,
-            substituePour: 0,
-          },
+          nom: 'FRAIS INSCRIPTION',
+          elementsDossier: [
+            { id: 'dossier-element', paiements: [{ id: 'paiement-id' }] },
+          ],
+          substituePour: [],
+          utiliseCommeSubstitutDans: [],
         }),
-        delete: deleteElement,
+        updateMany: jest.fn(),
+        delete: jest.fn(),
       },
+      utilisateur: { findUnique: jest.fn().mockResolvedValue(null) },
+      elementCorbeille: { create: jest.fn() },
+      paiement: { updateMany: jest.fn() },
+      elementDossier: { deleteMany: jest.fn(), updateMany: jest.fn() },
     };
     const prisma = {
       $transaction: jest.fn(
@@ -53,37 +61,46 @@ describe('ElementsRequisService.remove', () => {
           callback(transaction),
       ),
     } as unknown as PrismaService;
-    const service = new ElementsRequisService(prisma);
+    return { transaction, service: new ElementsRequisService(prisma) };
+  };
 
-    await expect(service.remove('element-id')).rejects.toThrow('déjà utilisé');
-    expect(deleteElement).not.toHaveBeenCalled();
+  it('requires a reason before moving an element to the trash', async () => {
+    const { transaction, service } = setup();
+
+    await expect(service.remove('element-id', 'non', 'user')).rejects.toThrow(
+      'motif',
+    );
+    expect(transaction.elementRequis.delete).not.toHaveBeenCalled();
   });
 
-  it('deletes an unused element reference', async () => {
-    const deleted = { id: 'element-id' };
-    const deleteElement = jest.fn().mockResolvedValue(deleted);
-    const transaction = {
-      elementRequis: {
-        findUnique: jest.fn().mockResolvedValue({
-          id: 'element-id',
-          _count: {
-            elementsDossier: 0,
-            utiliseCommeSubstitutDans: 0,
-            substituePour: 0,
-          },
-        }),
-        delete: deleteElement,
-      },
-    };
-    const prisma = {
-      $transaction: jest.fn(
-        (callback: (tx: typeof transaction) => Promise<unknown>) =>
-          callback(transaction),
-      ),
-    } as unknown as PrismaService;
-    const service = new ElementsRequisService(prisma);
+  it('archives a used element, removes it from dossiers and keeps its payments unassigned', async () => {
+    const { transaction, service } = setup();
 
-    await expect(service.remove('element-id')).resolves.toBe(deleted);
-    expect(deleteElement).toHaveBeenCalledWith({ where: { id: 'element-id' } });
+    await expect(
+      service.remove('element-id', 'Doublon du frais L2', 'user'),
+    ).resolves.toEqual({ id: 'element-id', dossiersConcernes: 1 });
+
+    expect(transaction.elementCorbeille.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: 'ELEMENT_REQUIS',
+        libelle: 'FRAIS INSCRIPTION',
+        motif: 'Doublon du frais L2',
+        donnees: expect.objectContaining({
+          elementsDossier: [
+            { id: 'dossier-element', paiementIds: ['paiement-id'] },
+          ],
+        }),
+      }),
+    });
+    expect(transaction.paiement.updateMany).toHaveBeenCalledWith({
+      where: { elementDossierId: { in: ['dossier-element'] } },
+      data: { elementDossierId: null },
+    });
+    expect(transaction.elementDossier.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['dossier-element'] } },
+    });
+    expect(transaction.elementRequis.delete).toHaveBeenCalledWith({
+      where: { id: 'element-id' },
+    });
   });
 });

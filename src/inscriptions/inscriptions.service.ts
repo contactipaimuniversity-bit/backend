@@ -27,7 +27,12 @@ type StatutElementValue = (typeof STATUTS_ELEMENT)[number];
 export class InscriptionsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(createDto: CreateInscriptionDto, creeParId: string) {
+  // dateSaisie : heure réelle d'une saisie faite hors ligne (sinon, maintenant).
+  async create(
+    createDto: CreateInscriptionDto,
+    creeParId: string,
+    dateSaisie?: Date,
+  ) {
     const nouvellePersonne = createDto.nouvellePersonne;
     const viaBourse = createDto.viaBourse === true;
     if (nouvellePersonne && (createDto.personneId || viaBourse)) {
@@ -95,7 +100,9 @@ export class InscriptionsService {
           montantAttendu: element.montantAttendu,
           statut,
           dateFourniture:
-            statut === 'FOURNI' || statut === 'SUBSTITUE' ? new Date() : null,
+            statut === 'FOURNI' || statut === 'SUBSTITUE'
+              ? (dateSaisie ?? new Date())
+              : null,
           elementSubstitutUtiliseId:
             statut === 'SUBSTITUE' ? element.elementSubstitutId : null,
         };
@@ -127,6 +134,7 @@ export class InscriptionsService {
                   nouvellePersonne.tuteurTelephone,
                 ),
                 creeParId,
+                ...(dateSaisie ? { dateEnregistrement: dateSaisie } : {}),
               },
               select: { id: true },
             })
@@ -145,6 +153,7 @@ export class InscriptionsService {
           elementsDossier: {
             create: dossierElements,
           },
+          ...(dateSaisie ? { dateInscription: dateSaisie } : {}),
         },
         include: this.detailInclude(),
       });
@@ -163,6 +172,7 @@ export class InscriptionsService {
             elementDossierId: element.id,
             montant: preparationPayment.montant,
             typePaiement: preparationPayment.typePaiement,
+            ...(dateSaisie ? { datePaiement: dateSaisie } : {}),
           },
         });
         return transaction.inscription.findUnique({
@@ -485,11 +495,17 @@ export class InscriptionsService {
       );
     }
 
-    return this.prisma.inscription.update({
+    const inscription = await this.prisma.inscription.update({
       where: { id },
       data,
       include: this.detailInclude(),
     });
+    // Un changement de niveau change les frais dus.
+    if (data.niveau && data.niveau !== current.niveau) {
+      await this.ensureElementsForDossier(id);
+      return this.findOne(id);
+    }
+    return inscription;
   }
 
   async findElements(id: string) {
@@ -585,6 +601,41 @@ export class InscriptionsService {
       })),
       skipDuplicates: true,
     });
+    await this.retirerFraisHorsNiveau(id, inscription.niveau);
+  }
+
+  // Un dossier ne doit que les frais de son niveau. Un frais d'un autre niveau
+  // peut y rester (ancien frais unique devenu « L1 », niveau corrigé après
+  // coup) : on le retire, et ce qui a déjà été payé dessus est reporté sur le
+  // frais du bon niveau.
+  private async retirerFraisHorsNiveau(id: string, niveau: string) {
+    const niveaux = this.niveauApplicable(niveau).in;
+    const frais = await this.prisma.elementDossier.findMany({
+      where: {
+        inscriptionId: id,
+        elementRequis: { categorie: 'FRAIS', contexte: 'INSCRIPTION_DIRECTE' },
+      },
+      include: { elementRequis: { select: { niveauApplicable: true } } },
+    });
+    const horsNiveau = frais.filter(
+      (element) => !niveaux.includes(element.elementRequis.niveauApplicable),
+    );
+    if (!horsNiveau.length) return;
+    const duNiveau = frais.filter((element) => !horsNiveau.includes(element));
+    // Sans frais unique où le reporter, le versement redevient « non affecté » :
+    // il reste compté sur le dossier. S'il dépasse le nouveau frais, l'excédent
+    // apparaît comme un trop-perçu à reporter ou à rembourser.
+    const cible = duNiveau.length === 1 ? duNiveau[0] : null;
+    const horsNiveauIds = horsNiveau.map((element) => element.id);
+    await this.prisma.$transaction([
+      this.prisma.paiement.updateMany({
+        where: { elementDossierId: { in: horsNiveauIds } },
+        data: { elementDossierId: cible?.id ?? null },
+      }),
+      this.prisma.elementDossier.deleteMany({
+        where: { id: { in: horsNiveauIds } },
+      }),
+    ]);
   }
 
   async updateElement(
@@ -723,6 +774,7 @@ export class InscriptionsService {
       select: {
         id: true,
         personneId: true,
+        niveau: true,
         viaBourse: true,
         demandeBourseId: true,
       },

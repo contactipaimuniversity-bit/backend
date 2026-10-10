@@ -3,6 +3,8 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { CloudinaryService } from '../fichiers/cloudinary.service';
+import type { FichierRecu } from '../fichiers/cloudinary.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { refuserSuppressionScolarite } from '../common/scolarite-guard';
 import { CreatePersonneDto } from './dto/create-personne.dto';
@@ -16,9 +18,16 @@ import { parseDateOrder } from '../common/date-order';
 
 @Injectable()
 export class PersonnesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cloudinary: CloudinaryService,
+  ) {}
 
-  async create(createDto: CreatePersonneDto, creeParId: string) {
+  async create(
+    createDto: CreatePersonneDto,
+    creeParId: string,
+    dateSaisie?: Date,
+  ) {
     const nom = this.requiredString(createDto.nom, 'nom');
     const prenom = this.requiredString(createDto.prenom, 'prenom');
 
@@ -38,6 +47,7 @@ export class PersonnesService {
         tuteurPrenom: this.optionalString(createDto.tuteurPrenom),
         tuteurTelephone: this.optionalString(createDto.tuteurTelephone),
         creePar: { connect: { id: creeParId } },
+        ...(dateSaisie ? { dateEnregistrement: dateSaisie } : {}),
       },
     });
   }
@@ -184,6 +194,59 @@ export class PersonnesService {
       where: { id },
       data,
     });
+  }
+
+  // La photo est facultative : une personne sans photo reste un dossier valide.
+  async definirPhoto(id: string, fichier: FichierRecu | undefined) {
+    const personne = await this.prisma.personne.findUnique({
+      where: { id },
+      select: { photoPublicId: true },
+    });
+    if (!personne) throw new NotFoundException('Personne introuvable');
+    const recu = this.cloudinary.verifier(fichier, 'Photo');
+    if (!recu.mimetype.startsWith('image/'))
+      throw new BadRequestException(
+        'Photo : seules les images JPG, PNG ou WEBP sont acceptées',
+      );
+    const heberge = await this.cloudinary.envoyer(recu, `ipaim/photos/${id}`);
+    const resultat = await this.prisma.personne.update({
+      where: { id },
+      data: { photoUrl: heberge.url, photoPublicId: heberge.publicId },
+      select: this.personneSelect(),
+    });
+    if (personne.photoPublicId)
+      void this.cloudinary.supprimer(personne.photoPublicId, 'image');
+    return resultat;
+  }
+
+  async lirePhoto(id: string) {
+    const personne = await this.prisma.personne.findUnique({
+      where: { id },
+      select: { photoUrl: true, photoPublicId: true },
+    });
+    if (!personne?.photoUrl || !personne.photoPublicId)
+      throw new NotFoundException('Aucune photo pour cette personne');
+    const format = /\.(jpe?g|png|webp)$/i.exec(personne.photoUrl)?.[1] ?? 'jpg';
+    return this.cloudinary.telechargerImage(
+      personne.photoPublicId,
+      format.toLowerCase(),
+    );
+  }
+
+  async retirerPhoto(id: string) {
+    const personne = await this.prisma.personne.findUnique({
+      where: { id },
+      select: { photoPublicId: true },
+    });
+    if (!personne) throw new NotFoundException('Personne introuvable');
+    const resultat = await this.prisma.personne.update({
+      where: { id },
+      data: { photoUrl: null, photoPublicId: null },
+      select: this.personneSelect(),
+    });
+    if (personne.photoPublicId)
+      void this.cloudinary.supprimer(personne.photoPublicId, 'image');
+    return resultat;
   }
 
   async remove(id: string, rawReason: string, deletedById: string) {
@@ -385,6 +448,60 @@ export class PersonnesService {
     }
   }
 
+  // Même nom et même prénom, sans tenir compte de la casse. Quand la date de
+  // naissance ou le téléphone sont connus des deux côtés, l'un des deux doit
+  // concorder : deux homonymes nés à des dates différentes ne sont pas signalés.
+  async doublons(criteres: {
+    nom?: string;
+    prenom?: string;
+    dateNaissance?: string;
+    telephone?: string;
+    exclure?: string;
+  }) {
+    const nom = criteres.nom?.trim();
+    const prenom = criteres.prenom?.trim();
+    if (!nom || !prenom) return [];
+    const telephone = criteres.telephone?.replace(/\s/g, '') || null;
+    const naissance = new Date(criteres.dateNaissance ?? '');
+    const jour = Number.isNaN(naissance.getTime())
+      ? null
+      : new Date(naissance.toISOString().slice(0, 10));
+    const candidats = await this.prisma.personne.findMany({
+      where: {
+        nom: { equals: nom, mode: 'insensitive' },
+        prenom: { equals: prenom, mode: 'insensitive' },
+        ...(criteres.exclure ? { id: { not: criteres.exclure } } : {}),
+      },
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        dateNaissance: true,
+        telephone: true,
+        matricule: true,
+        quartier: true,
+      },
+      orderBy: { dateEnregistrement: 'desc' },
+      take: 20,
+    });
+    return candidats
+      .filter((candidat) => {
+        const memeJour =
+          jour && candidat.dateNaissance
+            ? candidat.dateNaissance.toISOString().slice(0, 10) ===
+              jour.toISOString().slice(0, 10)
+            : null;
+        const memeTelephone =
+          telephone && candidat.telephone
+            ? candidat.telephone.replace(/\s/g, '') === telephone
+            : null;
+        // Rien de comparable : l'homonymie seule suffit à avertir.
+        if (memeJour === null && memeTelephone === null) return true;
+        return memeJour === true || memeTelephone === true;
+      })
+      .slice(0, 5);
+  }
+
   private requiredString(value: string | undefined, field: string): string {
     const normalized = value?.trim();
 
@@ -439,6 +556,9 @@ export class PersonnesService {
       tuteurPrenom: true,
       tuteurTelephone: true,
       dateEnregistrement: true,
+      photoUrl: true,
+      // Version de la fiche : contrôle des modifications préparées hors ligne.
+      modifieLe: true,
     } as const;
   }
 }

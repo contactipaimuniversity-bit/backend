@@ -65,6 +65,10 @@ enum TypePaiement {
   FRAIS_DEPOT
   FRAIS_INSCRIPTION
   ECHEANCE_BOURSE
+  // Sortie de caisse : trop-perçu rendu à l'étudiant (montant négatif).
+  REMBOURSEMENT
+  // Trop-perçu déplacé d'une obligation à une autre : une ligne négative et une positive.
+  REPORT
 }
 
 enum StatutCandidaturePersonnel {
@@ -219,6 +223,15 @@ model Personne {
   matricule String? @unique
   sexe      String?
 
+  // Photo d'identité (facultative), hébergée comme les pièces numérisées.
+  photoUrl      String?
+  photoPublicId String?
+
+  // Dernière modification : sert à refuser une modification faite hors ligne sur
+  // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
+  modifieLe DateTime @default(now()) @updatedAt
+
+  @@index([modifieLe])
   @@map("personnes")
 }
 
@@ -235,6 +248,11 @@ model Prospect {
   themes   ThemeDiscussion[]
   relances ProspectRelance[]
 
+  // Dernière modification : sert à refuser une modification faite hors ligne sur
+  // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
+  modifieLe DateTime @default(now()) @updatedAt
+
+  @@index([modifieLe])
   @@map("prospects")
 }
 
@@ -260,8 +278,11 @@ model ProspectRelance {
   statutRelance        StatutRelance
   date                 DateTime      @default(now())
   dateProchaineRelance DateTime?
+  // Heure de réception par le serveur (la date métier peut être celle d'une saisie hors ligne).
+  enregistreLe         DateTime      @default(now())
 
   @@index([prospectId, date])
+  @@index([enregistreLe])
   @@map("prospect_relances")
 }
 
@@ -312,6 +333,11 @@ model DemandeBourse {
   elementsDossier ElementDossier[]
   paiements       Paiement[]
 
+  // Dernière modification : sert à refuser une modification faite hors ligne sur
+  // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
+  modifieLe DateTime @default(now()) @updatedAt
+
+  @@index([modifieLe])
   @@map("demandes_bourse")
 }
 
@@ -337,6 +363,11 @@ model Inscription {
   notes     Note[]
   resultats ResultatDeliberation[]
 
+  // Dernière modification : sert à refuser une modification faite hors ligne sur
+  // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
+  modifieLe DateTime @default(now()) @updatedAt
+
+  @@index([modifieLe])
   @@map("inscriptions")
 }
 
@@ -372,9 +403,13 @@ model ElementDossier {
   elementSubstitutUtiliseId String?
   elementSubstitutUtilise   ElementRequis?       @relation("SubstitutUtiliseDansDossier", fields: [elementSubstitutUtiliseId], references: [id])
   paiements                 Paiement[]
+  // Dernière modification : sert à refuser une modification faite hors ligne sur
+  // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
+  modifieLe                 DateTime             @default(now()) @updatedAt
 
   @@unique([demandeBourseId, elementRequisId])
   @@unique([inscriptionId, elementRequisId])
+  @@index([modifieLe])
   @@map("elements_dossier")
 }
 
@@ -391,7 +426,14 @@ model Paiement {
   montant          Decimal         @db.Decimal(10, 2)
   datePaiement     DateTime        @default(now())
   typePaiement     TypePaiement
+  // Renseignés pour un remboursement ou un report : la raison et son auteur.
+  motif            String?
+  saisiParNom      String?
 
+  // Heure de réception par le serveur (la date métier peut être celle d'une saisie hors ligne).
+  enregistreLe DateTime @default(now())
+
+  @@index([enregistreLe])
   @@map("paiements")
 }
 
@@ -410,6 +452,10 @@ model CandidaturePersonnel {
   dateDepot       DateTime                   @default(now())
 
   elementsDossier ElementPersonnel[]
+
+  // Dernière modification : sert à refuser une modification faite hors ligne sur
+  // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
+  modifieLe DateTime @default(now()) @updatedAt
 
   @@map("candidatures_personnel")
 }

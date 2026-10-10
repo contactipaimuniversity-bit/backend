@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { dateSaisieLocale } from '../common/saisie-locale';
 import { CreateProspectDto } from './dto/create-prospect.dto';
 import { CreateProspectRelanceDto } from './dto/create-prospect-relance.dto';
 import { CreateThemeDto } from './dto/create-theme.dto';
@@ -28,7 +29,11 @@ export class ProspectsController {
     @Body() createDto: CreateProspectDto,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.prospectsService.create(createDto, request.user.sub);
+    return this.prospectsService.create(
+      createDto,
+      request.user.sub,
+      dateSaisieLocale(request),
+    );
   }
 
   @Get(':id/relances')
@@ -42,7 +47,12 @@ export class ProspectsController {
     @Body() createDto: CreateProspectRelanceDto,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.prospectsService.createRelance(id, createDto, request.user.sub);
+    return this.prospectsService.createRelance(
+      id,
+      createDto,
+      request.user.sub,
+      dateSaisieLocale(request),
+    );
   }
 
   @Get('a-relancer')

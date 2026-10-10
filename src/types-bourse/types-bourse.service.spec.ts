@@ -20,6 +20,8 @@ describe('TypesBourseService.remove', () => {
       },
       echeanceBourse: { deleteMany: deleteSchedules },
       paiement: { count: jest.fn().mockResolvedValue(0) },
+      utilisateur: { findUnique: jest.fn().mockResolvedValue(null) },
+      elementCorbeille: { create: jest.fn() },
     };
     const prisma = {
       $transaction: jest.fn(
@@ -29,7 +31,9 @@ describe('TypesBourseService.remove', () => {
     } as unknown as PrismaService;
     const service = new TypesBourseService(prisma);
 
-    await expect(service.remove('type-id')).rejects.toThrow('déjà lié');
+    await expect(
+      service.remove('type-id', 'Type en double', 'user'),
+    ).rejects.toThrow('déjà lié');
     expect(deleteSchedules).not.toHaveBeenCalled();
     expect(deleteType).not.toHaveBeenCalled();
   });
@@ -42,6 +46,7 @@ describe('TypesBourseService.remove', () => {
       typeBourse: {
         findUnique: jest.fn().mockResolvedValue({
           id: 'type-id',
+          nom: 'Excellence',
           demandesBourse: [],
           echeances: [{ id: 'schedule-id' }],
         }),
@@ -49,6 +54,8 @@ describe('TypesBourseService.remove', () => {
       },
       echeanceBourse: { deleteMany: deleteSchedules },
       paiement: { count: jest.fn().mockResolvedValue(0) },
+      utilisateur: { findUnique: jest.fn().mockResolvedValue(null) },
+      elementCorbeille: { create: jest.fn() },
     };
     const prisma = {
       $transaction: jest.fn(
@@ -58,7 +65,18 @@ describe('TypesBourseService.remove', () => {
     } as unknown as PrismaService;
     const service = new TypesBourseService(prisma);
 
-    await expect(service.remove('type-id')).resolves.toBe(deleted);
+    await expect(
+      service.remove('type-id', 'Type en double', 'user'),
+    ).resolves.toEqual(deleted);
+    expect(transaction.elementCorbeille.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: 'TYPE_BOURSE',
+        libelle: 'Excellence',
+        donnees: expect.objectContaining({
+          echeances: [{ id: 'schedule-id' }],
+        }),
+      }),
+    });
     expect(deleteSchedules).toHaveBeenCalledWith({
       where: { typeBourseId: 'type-id' },
     });

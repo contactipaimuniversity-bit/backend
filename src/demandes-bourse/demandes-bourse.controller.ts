@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { dateSaisieLocale } from '../common/saisie-locale';
 import { MotifSuppressionDto } from '../corbeille/dto/motif-suppression.dto';
 import { CreateDemandeBourseDto } from './dto/create-demande-bourse.dto';
 import { SearchDemandesBourseDto } from './dto/search-demandes-bourse.dto';
@@ -30,7 +31,11 @@ export class DemandesBourseController {
     @Body() createDto: CreateDemandeBourseDto,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.demandesBourseService.create(createDto, request.user.sub);
+    return this.demandesBourseService.create(
+      createDto,
+      request.user.sub,
+      dateSaisieLocale(request),
+    );
   }
 
   @Get()

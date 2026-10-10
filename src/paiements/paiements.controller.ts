@@ -6,9 +6,17 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
+import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { acteurDe } from '../common/acteur';
+import { saisieLocale } from '../common/saisie-locale';
+import {
+  RembourserTropPercuDto,
+  ReporterTropPercuDto,
+} from './dto/trop-percu.dto';
 import { CreatePaiementDto } from './dto/create-paiement.dto';
 import { AssignPaiementDto } from './dto/assign-paiement.dto';
 import { PaiementsService } from './paiements.service';
@@ -19,8 +27,11 @@ export class PaiementsController {
   constructor(private readonly paiementsService: PaiementsService) {}
 
   @Post('paiements')
-  create(@Body() createDto: CreatePaiementDto) {
-    return this.paiementsService.create(createDto);
+  create(
+    @Body() createDto: CreatePaiementDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.paiementsService.create(createDto, saisieLocale(request));
   }
 
   @Get('paiements')
@@ -36,6 +47,29 @@ export class PaiementsController {
   @Patch('paiements/:id/affectation')
   assignToElement(@Param('id') id: string, @Body() dto: AssignPaiementDto) {
     return this.paiementsService.assignToElement(id, dto.elementDossierId);
+  }
+
+  // Régularisation d'un trop-perçu : report sur une autre obligation, ou remboursement.
+  @Post('paiements/reports')
+  reporterTropPercu(
+    @Body() dto: ReporterTropPercuDto | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.paiementsService.reporterTropPercu(
+      dto ?? {},
+      acteurDe(request).nom,
+    );
+  }
+
+  @Post('paiements/remboursements')
+  rembourserTropPercu(
+    @Body() dto: RembourserTropPercuDto | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.paiementsService.rembourserTropPercu(
+      dto ?? {},
+      acteurDe(request).nom,
+    );
   }
 
   @Get('demandes-bourse/:id/paiements')

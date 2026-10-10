@@ -4,6 +4,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  requiredDeletionReason,
+  toTrashSnapshot,
+  trashAuthor,
+} from '../corbeille/corbeille.utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateEcheanceDto } from './dto/create-echeance.dto';
 import { CreateTypeBourseDto } from './dto/create-type-bourse.dto';
@@ -85,14 +90,17 @@ export class TypesBourseService {
     return this.withScheduleMetadata(type);
   }
 
-  async remove(id: string) {
+  // Un type de bourse sans dossier part à la corbeille avec ses échéances.
+  // Déjà attribué ou encaissé, il reste en place : le retirer fausserait les
+  // demandes acceptées et leurs versements.
+  async remove(id: string, rawReason: string | undefined, deletedById: string) {
+    const motif = requiredDeletionReason(rawReason);
     return this.prisma.$transaction(async (transaction) => {
       const type = await transaction.typeBourse.findUnique({
         where: { id },
-        select: {
-          id: true,
+        include: {
           demandesBourse: { select: { id: true }, take: 1 },
-          echeances: { select: { id: true } },
+          echeances: { orderBy: { ordre: 'asc' } },
         },
       });
       if (!type) {
@@ -107,14 +115,27 @@ export class TypesBourseService {
         : 0;
       if (type.demandesBourse.length > 0 || paiementCount > 0) {
         throw new ConflictException(
-          'Ce type de bourse est déjà lié à des demandes ou paiements et ne peut pas être supprimé.',
+          'Ce type de bourse est déjà lié à des demandes ou paiements et ne peut pas être mis à la corbeille. Attribuez d’abord un autre type aux demandes concernées.',
         );
       }
 
+      const { demandesBourse, ...typeBourse } = type;
+      void demandesBourse;
+      await transaction.elementCorbeille.create({
+        data: {
+          type: 'TYPE_BOURSE',
+          entiteId: id,
+          libelle: type.nom,
+          motif,
+          ...(await trashAuthor(transaction, deletedById)),
+          donnees: toTrashSnapshot(typeBourse),
+        },
+      });
       await transaction.echeanceBourse.deleteMany({
         where: { typeBourseId: id },
       });
-      return transaction.typeBourse.delete({ where: { id } });
+      await transaction.typeBourse.delete({ where: { id } });
+      return { id };
     });
   }
 

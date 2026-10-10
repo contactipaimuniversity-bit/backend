@@ -1,9 +1,13 @@
 import {
   BadRequestException,
-  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  requiredDeletionReason,
+  toTrashSnapshot,
+  trashAuthor,
+} from '../corbeille/corbeille.utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateElementRequisDto } from './dto/create-element-requis.dto';
 import { SearchElementsRequisDto } from './dto/search-elements-requis.dto';
@@ -61,7 +65,11 @@ export class ElementsRequisService {
 
     return this.prisma.elementRequis.findMany({
       where,
-      include: { elementSubstitut: true },
+      include: {
+        elementSubstitut: true,
+        // Nombre de dossiers concernés, annoncé avant une mise à la corbeille.
+        _count: { select: { elementsDossier: true } },
+      },
       orderBy: [{ categorie: 'asc' }, { nom: 'asc' }],
     });
   }
@@ -160,36 +168,69 @@ export class ElementsRequisService {
     });
   }
 
-  async remove(id: string) {
+  // Mise à la corbeille, même pour un élément déjà utilisé : il est retiré des
+  // dossiers, et ce qui avait été payé dessus reste sur le dossier, non affecté.
+  async remove(id: string, rawReason: string | undefined, deletedById: string) {
+    const motif = requiredDeletionReason(rawReason);
     return this.prisma.$transaction(async (transaction) => {
       const element = await transaction.elementRequis.findUnique({
         where: { id },
-        select: {
-          id: true,
-          _count: {
-            select: {
-              elementsDossier: true,
-              utiliseCommeSubstitutDans: true,
-              substituePour: true,
-            },
-          },
+        include: {
+          elementsDossier: { include: { paiements: { select: { id: true } } } },
+          substituePour: { select: { id: true } },
+          utiliseCommeSubstitutDans: { select: { id: true } },
         },
       });
       if (!element) {
         throw new NotFoundException('Element requis introuvable');
       }
-      const usage = element._count;
-      if (
-        usage.elementsDossier > 0 ||
-        usage.utiliseCommeSubstitutDans > 0 ||
-        usage.substituePour > 0
-      ) {
-        throw new ConflictException(
-          'Cet élément est déjà utilisé dans des dossiers ou comme substitut et ne peut pas être supprimé.',
-        );
-      }
+      const {
+        elementsDossier,
+        substituePour,
+        utiliseCommeSubstitutDans,
+        ...elementRequis
+      } = element;
+      const elementDossierIds = elementsDossier.map((item) => item.id);
 
-      return transaction.elementRequis.delete({ where: { id } });
+      await transaction.elementCorbeille.create({
+        data: {
+          type: 'ELEMENT_REQUIS',
+          entiteId: id,
+          libelle: element.nom,
+          motif,
+          ...(await trashAuthor(transaction, deletedById)),
+          donnees: toTrashSnapshot({
+            elementRequis,
+            elementsDossier: elementsDossier.map(({ paiements, ...item }) => ({
+              ...item,
+              paiementIds: paiements.map((paiement) => paiement.id),
+            })),
+            substituePourIds: substituePour.map((item) => item.id),
+            substitutUtiliseDansIds: utiliseCommeSubstitutDans.map(
+              (item) => item.id,
+            ),
+          }),
+        },
+      });
+
+      await transaction.paiement.updateMany({
+        where: { elementDossierId: { in: elementDossierIds } },
+        data: { elementDossierId: null },
+      });
+      await transaction.elementDossier.deleteMany({
+        where: { id: { in: elementDossierIds } },
+      });
+      // Une pièce remplacée par cet élément redevient simplement attendue.
+      await transaction.elementDossier.updateMany({
+        where: { elementSubstitutUtiliseId: id },
+        data: { elementSubstitutUtiliseId: null, statut: 'ATTENDU' },
+      });
+      await transaction.elementRequis.updateMany({
+        where: { elementSubstitutId: id },
+        data: { elementSubstitutId: null },
+      });
+      await transaction.elementRequis.delete({ where: { id } });
+      return { id, dossiersConcernes: elementDossierIds.length };
     });
   }
 

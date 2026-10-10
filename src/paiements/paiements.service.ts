@@ -6,7 +6,12 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { parseDateOrder } from '../common/date-order';
+import type { SaisieLocale } from '../common/saisie-locale';
 import { CreatePaiementDto } from './dto/create-paiement.dto';
+import {
+  RembourserTropPercuDto,
+  ReporterTropPercuDto,
+} from './dto/trop-percu.dto';
 
 const TYPES_PAIEMENT = [
   'FRAIS_DEPOT',
@@ -15,12 +20,22 @@ const TYPES_PAIEMENT = [
 ] as const;
 
 type TypePaiementValue = (typeof TYPES_PAIEMENT)[number];
+type Transaction = Parameters<Parameters<PrismaService['$transaction']>[0]>[0];
 
 @Injectable()
 export class PaiementsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(createDto: CreatePaiementDto) {
+  async create(createDto: CreatePaiementDto, saisie: SaisieLocale = {}) {
+    // Paiement saisi hors ligne et déjà reçu : on le renvoie tel quel, sans
+    // jamais l'encaisser une seconde fois.
+    if (saisie.id) {
+      const dejaRecu = await this.prisma.paiement.findUnique({
+        where: { id: saisie.id },
+        include: { echeance: true, elementDossier: true },
+      });
+      if (dejaRecu) return dejaRecu;
+    }
     const demandeBourseId = this.optionalString(createDto.demandeBourseId);
     const inscriptionId = this.optionalString(createDto.inscriptionId);
     const echeanceId = this.optionalString(createDto.echeanceId);
@@ -122,6 +137,8 @@ export class PaiementsService {
         elementDossierId,
         montant,
         typePaiement,
+        ...(saisie.id ? { id: saisie.id } : {}),
+        ...(saisie.date ? { datePaiement: saisie.date } : {}),
       },
       include: { echeance: true, elementDossier: true },
     });
@@ -156,11 +173,31 @@ export class PaiementsService {
       },
       orderBy: [{ datePaiement: ordreDate }, { id: ordreDate }],
     });
-    return payments.map((payment) => ({
+    return payments.map((payment) => this.transaction(payment));
+  }
+
+  private transaction(payment: {
+    id: string;
+    montant: unknown;
+    datePaiement: Date;
+    typePaiement: string;
+    motif: string | null;
+    saisiParNom: string | null;
+    demandeBourseId: string | null;
+    inscriptionId: string | null;
+    echeanceId: string | null;
+    demandeBourse: { filiereSouhaitee: string; personne: unknown } | null;
+    inscription: { filiere: string; personne: unknown } | null;
+    elementDossier: { elementRequis: { nom: string } } | null;
+    echeance: { libelle: string } | null;
+  }) {
+    return {
       id: payment.id,
       montant: payment.montant,
       datePaiement: payment.datePaiement,
       typePaiement: payment.typePaiement,
+      motif: payment.motif,
+      saisiParNom: payment.saisiParNom,
       dossierId: payment.demandeBourseId ?? payment.inscriptionId,
       dossierType: payment.demandeBourseId ? 'demande-bourse' : 'inscription',
       dossier: payment.demandeBourse
@@ -171,12 +208,165 @@ export class PaiementsService {
       obligation: payment.elementDossier?.elementRequis.nom ?? null,
       echeance: payment.echeance?.libelle ?? null,
       affecte: payment.elementDossier !== null || payment.echeanceId !== null,
-    }));
+    };
+  }
+
+  // ---------- Trop-perçu ----------
+  // Une obligation peut avoir reçu plus que son montant (niveau corrigé après
+  // paiement, par exemple). L'excédent se reporte sur une autre obligation du
+  // même dossier, ou se rembourse. Rien n'est modifié ni effacé : chaque geste
+  // ajoute ses propres lignes, signées et datées.
+
+  private async obligationAvecTropPercu(
+    transaction: Transaction,
+    elementDossierId: string | undefined,
+  ) {
+    const obligation = elementDossierId
+      ? await transaction.elementDossier.findUnique({
+          where: { id: elementDossierId },
+          include: {
+            elementRequis: { select: { nom: true } },
+            paiements: { select: { montant: true } },
+          },
+        })
+      : null;
+    if (!obligation)
+      throw new NotFoundException('Obligation de dossier introuvable');
+    const paye = obligation.paiements.reduce(
+      (total, paiement) => total + Number(paiement.montant),
+      0,
+    );
+    const attendu = Number(obligation.montantAttendu ?? 0);
+    return {
+      obligation,
+      reste: this.roundMoney(Math.max(0, attendu - paye)),
+      tropPercu: this.roundMoney(Math.max(0, paye - attendu)),
+    };
+  }
+
+  private montantDansTropPercu(
+    value: string | number | undefined,
+    tropPercu: number,
+    nom: string,
+  ) {
+    if (tropPercu <= 0)
+      throw new BadRequestException(
+        `« ${nom} » n'a aucun trop-perçu : il n'y a rien à reporter ni à rembourser`,
+      );
+    const montant = Number(this.montant(value));
+    if (montant > tropPercu)
+      throw new BadRequestException(
+        `Le montant dépasse le trop-perçu de « ${nom} » (${tropPercu} F)`,
+      );
+    return montant;
+  }
+
+  async reporterTropPercu(dto: Partial<ReporterTropPercuDto>, auteur: string) {
+    return this.prisma.$transaction(async (transaction) => {
+      const source = await this.obligationAvecTropPercu(
+        transaction,
+        dto.elementDossierId,
+      );
+      const cible = await this.obligationAvecTropPercu(
+        transaction,
+        dto.cibleElementDossierId,
+      );
+      const nomSource = source.obligation.elementRequis.nom;
+      const nomCible = cible.obligation.elementRequis.nom;
+      if (
+        cible.obligation.id === source.obligation.id ||
+        cible.obligation.demandeBourseId !==
+          source.obligation.demandeBourseId ||
+        cible.obligation.inscriptionId !== source.obligation.inscriptionId
+      )
+        throw new BadRequestException(
+          'Le report se fait vers une autre obligation du même dossier',
+        );
+      const montant = this.montantDansTropPercu(
+        dto.montant,
+        source.tropPercu,
+        nomSource,
+      );
+      if (montant > cible.reste)
+        throw new BadRequestException(
+          cible.reste > 0
+            ? `« ${nomCible} » n'attend plus que ${cible.reste} F : reportez au plus ce montant`
+            : `« ${nomCible} » est déjà soldée : choisissez une obligation qui a un reste à payer`,
+        );
+      const dossier = {
+        demandeBourseId: source.obligation.demandeBourseId,
+        inscriptionId: source.obligation.inscriptionId,
+        typePaiement: 'REPORT' as const,
+        saisiParNom: auteur,
+      };
+      await transaction.paiement.createMany({
+        data: [
+          {
+            ...dossier,
+            elementDossierId: source.obligation.id,
+            montant: (-montant).toFixed(2),
+            motif: `Trop-perçu reporté vers « ${nomCible} »`,
+          },
+          {
+            ...dossier,
+            elementDossierId: cible.obligation.id,
+            montant: montant.toFixed(2),
+            motif: `Trop-perçu reporté depuis « ${nomSource} »`,
+          },
+        ],
+      });
+      return { montant: montant.toFixed(2), de: nomSource, vers: nomCible };
+    });
+  }
+
+  async rembourserTropPercu(
+    dto: Partial<RembourserTropPercuDto>,
+    auteur: string,
+  ) {
+    const motif = dto.motif?.trim() ?? '';
+    if (motif.length < 5 || motif.length > 300)
+      throw new BadRequestException(
+        'Le motif du remboursement doit contenir entre 5 et 300 caractères',
+      );
+    return this.prisma.$transaction(async (transaction) => {
+      const source = await this.obligationAvecTropPercu(
+        transaction,
+        dto.elementDossierId,
+      );
+      const montant = this.montantDansTropPercu(
+        dto.montant,
+        source.tropPercu,
+        source.obligation.elementRequis.nom,
+      );
+      const remboursement = await transaction.paiement.create({
+        data: {
+          demandeBourseId: source.obligation.demandeBourseId,
+          inscriptionId: source.obligation.inscriptionId,
+          elementDossierId: source.obligation.id,
+          montant: (-montant).toFixed(2),
+          typePaiement: 'REMBOURSEMENT',
+          motif,
+          saisiParNom: auteur,
+        },
+        include: {
+          demandeBourse: { include: { personne: true } },
+          inscription: { include: { personne: true } },
+          elementDossier: { include: { elementRequis: true } },
+          echeance: true,
+        },
+      });
+      return this.transaction(remboursement);
+    });
   }
 
   async findUnassigned() {
     const payments = await this.prisma.paiement.findMany({
-      where: { elementDossierId: null, echeanceId: null },
+      where: {
+        elementDossierId: null,
+        echeanceId: null,
+        // Les régularisations (report, remboursement) ne sont pas à affecter.
+        typePaiement: { in: [...TYPES_PAIEMENT] },
+      },
       include: {
         demandeBourse: { include: { personne: true } },
         inscription: { include: { personne: true } },

@@ -1052,4 +1052,138 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .expect(200);
     expect(fichier.headers['content-type']).toMatch(/gzip/);
   });
+
+  // ---------- Saisies faites hors ligne ----------
+
+  it('reprend l’heure et l’identifiant d’une saisie faite hors ligne', async () => {
+    const saisie = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const demande = await api('admin')
+      .post('/demandes-bourse', {
+        nouvellePersonne: { nom: 'Horsligne', prenom: 'Etu' },
+        niveauDemande: 'PREMIERE_ANNEE',
+        filiereSouhaitee: 'Informatique',
+      })
+      .set('X-Saisie-Le', saisie)
+      .expect(201);
+    expect(demande.body.dateDepot).toBe(saisie);
+
+    // Deux versements identiques saisis hors ligne : deux paiements distincts.
+    const versement = {
+      demandeBourseId: demande.body.id,
+      montant: 5000,
+      typePaiement: 'FRAIS_DEPOT',
+    };
+    const premier = '0b5f6c1e-8a0d-4c8e-9d57-3f1a2b4c5d6e';
+    const second = '7c9e2d3f-1b4a-4e6f-8a7b-9c0d1e2f3a4b';
+    for (const identifiant of [premier, second]) {
+      const paiement = await api('admin')
+        .post('/paiements', versement)
+        .set('X-Saisie-Le', saisie)
+        .set('X-Identifiant-Local', identifiant)
+        .expect(201);
+      // Le reçu remis hors ligne garde sa référence et sa date.
+      expect(paiement.body).toMatchObject({
+        id: identifiant,
+        datePaiement: saisie,
+      });
+    }
+    // Un renvoi du même enregistrement ne l'encaisse pas une seconde fois.
+    await api('admin')
+      .post('/paiements', versement)
+      .set('X-Identifiant-Local', premier)
+      .expect(201);
+    const paiements = await api('admin').get(
+      `/demandes-bourse/${demande.body.id}/paiements`,
+    );
+    expect(paiements.body).toHaveLength(2);
+
+    // Une date invraisemblable est ignorée : le serveur garde son heure.
+    const futur = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const enLigne = await api('admin')
+      .post('/paiements', versement)
+      .set('X-Saisie-Le', futur)
+      .expect(201);
+    expect(enLigne.body.datePaiement).not.toBe(futur);
+  });
+
+  it('refuse une modification hors ligne sur une fiche changée entre-temps', async () => {
+    const personne = await api('admin')
+      .post('/personnes', {
+        nom: 'Conflit',
+        prenom: 'Test',
+        dateNaissance: '2005-03-04',
+        telephone: '07 00 00 00 99',
+      })
+      .expect(201);
+    const id = personne.body.id as string;
+    // La version connue de l'appareil figure dans les listes qu'il télécharge.
+    const liste = await api('admin').get('/personnes?q=Conflit');
+    const connue = liste.body.data[0].modifieLe as string;
+    expect(connue).toBeTruthy();
+
+    // Un collègue modifie la fiche en ligne.
+    const collegue = await api('admin')
+      .patch(`/personnes/${id}`, { quartier: 'Centre' })
+      .expect(200);
+    await api('admin')
+      .patch(`/personnes/${id}`, { quartier: 'Hors ligne' })
+      .set('X-Version-Connue', connue)
+      .expect(409);
+    // À partir de la version à jour, la modification passe.
+    await api('admin')
+      .patch(`/personnes/${id}`, { quartier: 'Hors ligne' })
+      .set('X-Version-Connue', collegue.body.modifieLe)
+      .expect(200);
+  });
+
+  it('signale les personnes semblables sans confondre les homonymes', async () => {
+    const doublons = (query: string) =>
+      api('admin').get(`/personnes/doublons?nom=conflit&prenom=TEST${query}`);
+    const semblable = await doublons('&dateNaissance=2005-03-04');
+    expect(semblable.body).toHaveLength(1);
+    // Même nom, autre date de naissance et autre téléphone : un homonyme.
+    const homonyme = await doublons(
+      '&dateNaissance=2001-01-01&telephone=0611111111',
+    );
+    expect(homonyme.body).toHaveLength(0);
+    // Le téléphone seul suffit à rapprocher, espaces ignorés.
+    expect((await doublons('&telephone=0700000099')).body).toHaveLength(1);
+    expect(
+      (await doublons(`&exclure=${semblable.body[0].id}`)).body,
+    ).toHaveLength(0);
+    // Un agent sans accès aux personnes ni aux dossiers n'interroge pas ce fichier.
+    await api('rh').get('/personnes/doublons?nom=a&prenom=b').expect(403);
+  });
+
+  it('indique les dossiers modifiés depuis le dernier téléchargement', async () => {
+    const complet = await api('admin').get('/synchronisation/changements');
+    expect(complet.body.complet).toBe(true);
+
+    const depuis = complet.body.horodatage as string;
+    const calme = await api('admin').get(
+      `/synchronisation/changements?depuis=${encodeURIComponent(depuis)}`,
+    );
+    expect(calme.body).toMatchObject({ complet: false, inscriptions: [] });
+
+    // Un paiement suffit à signaler son dossier, même daté d'une saisie passée.
+    const finance = await api('admin').get(`/inscriptions/${ids.b}/finance`);
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: ids.b,
+        elementDossierId: finance.body.obligations[0].id,
+        montant: 1000,
+        typePaiement: 'FRAIS_INSCRIPTION',
+      })
+      .set('X-Saisie-Le', new Date(Date.now() - 86_400_000).toISOString())
+      .expect(201);
+    const apres = await api('admin').get(
+      `/synchronisation/changements?depuis=${encodeURIComponent(depuis)}`,
+    );
+    expect(apres.body.inscriptions).toEqual([ids.b]);
+    // Sans droit sur les dossiers, la liste reste vide.
+    const rh = await api('rh').get(
+      `/synchronisation/changements?depuis=${encodeURIComponent(depuis)}`,
+    );
+    expect(rh.body.inscriptions).toEqual([]);
+  });
 });

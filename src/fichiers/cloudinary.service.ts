@@ -122,6 +122,42 @@ export class CloudinaryService {
     };
   }
 
+  // Lit une image par un lien signé de l'API : la diffusion publique
+  // (res.cloudinary.com) peut être fermée sur le compte.
+  async telechargerImage(
+    publicId: string,
+    format: string,
+  ): Promise<{ contenu: Buffer; type: string }> {
+    const { cloudName, apiKey, apiSecret } = this.config();
+    const params = {
+      format,
+      public_id: publicId,
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'upload',
+    };
+    const query = new URLSearchParams({
+      ...params,
+      api_key: apiKey,
+      signature: this.sign(params, apiSecret),
+    });
+    let response: Response;
+    try {
+      response = await fetch(
+        `https://api.cloudinary.com/v1_1/${cloudName}/image/download?${query.toString()}`,
+      );
+    } catch {
+      throw new BadGatewayException(
+        "Le service d'hébergement des fichiers est injoignable",
+      );
+    }
+    if (!response.ok)
+      throw new BadGatewayException("Le fichier n'a pas pu être lu");
+    return {
+      contenu: Buffer.from(await response.arrayBuffer()),
+      type: response.headers.get('content-type') ?? `image/${format}`,
+    };
+  }
+
   // Dépose un fichier brut (ni image ni PDF), par exemple une sauvegarde chiffrée.
   async envoyerBrut(
     contenu: Buffer,

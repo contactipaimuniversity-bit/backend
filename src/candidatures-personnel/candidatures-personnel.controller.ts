@@ -6,9 +6,12 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { dateSaisieLocale } from '../common/saisie-locale';
 import { CandidaturesPersonnelService } from './candidatures-personnel.service';
 import { CreateCandidaturePersonnelDto } from './dto/create-candidature-personnel.dto';
 import { SearchCandidaturesPersonnelDto } from './dto/search-candidatures-personnel.dto';
@@ -21,8 +24,8 @@ export class CandidaturesPersonnelController {
   constructor(private readonly service: CandidaturesPersonnelService) {}
 
   @Post()
-  create(@Body() dto: CreateCandidaturePersonnelDto) {
-    return this.service.create(dto);
+  create(@Body() dto: CreateCandidaturePersonnelDto, @Req() request: Request) {
+    return this.service.create(dto, dateSaisieLocale(request));
   }
 
   @Get()

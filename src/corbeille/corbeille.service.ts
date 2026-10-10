@@ -161,6 +161,8 @@ export class CorbeilleService {
             tuteurNom: nullableString(personne, 'tuteurNom'),
             tuteurPrenom: nullableString(personne, 'tuteurPrenom'),
             tuteurTelephone: nullableString(personne, 'tuteurTelephone'),
+            photoUrl: nullableString(personne, 'photoUrl'),
+            photoPublicId: nullableString(personne, 'photoPublicId'),
             dateEnregistrement: requiredDate(personne, 'dateEnregistrement'),
             creeParId: creator?.id ?? null,
           } as never,
@@ -321,6 +323,31 @@ export class CorbeilleService {
           transaction,
           snapshotRecords(inscription.paiements),
         );
+      } else if (entry.type === 'ELEMENT_REQUIS') {
+        await this.restoreElementRequis(transaction, data);
+      } else if (entry.type === 'TYPE_BOURSE') {
+        const typeBourseId = stringValue(data, 'id');
+        await transaction.typeBourse.create({
+          data: {
+            id: typeBourseId,
+            nom: stringValue(data, 'nom'),
+            fraisInscription: data.fraisInscription,
+            tauxReduction: data.tauxReduction ?? null,
+          } as never,
+        });
+        const echeances = snapshotRecords(data.echeances);
+        if (echeances.length) {
+          await transaction.echeanceBourse.createMany({
+            data: echeances.map((echeance) => ({
+              id: stringValue(echeance, 'id'),
+              typeBourseId,
+              libelle: stringValue(echeance, 'libelle'),
+              ordre: Number(echeance.ordre),
+              dateEcheance: nullableDate(echeance, 'dateEcheance'),
+              montantAttendu: echeance.montantAttendu ?? null,
+            })) as never,
+          });
+        }
       } else {
         throw new ConflictException(
           'Ce type d’archive ne peut pas être restauré',
@@ -329,6 +356,99 @@ export class CorbeilleService {
 
       await transaction.elementCorbeille.delete({ where: { id } });
       return { id, restaure: true };
+    });
+  }
+
+  // L'élément retrouve sa place dans les dossiers qui existent encore, et les
+  // versements restés non affectés depuis son retrait lui sont de nouveau rattachés.
+  private async restoreElementRequis(
+    transaction: Parameters<Parameters<PrismaService['$transaction']>[0]>[0],
+    data: SnapshotRecord,
+  ) {
+    const element = snapshotRecord(data.elementRequis);
+    const elementId = stringValue(element, 'id');
+    const idsOf = (rows: SnapshotRecord[], key: string) =>
+      rows.flatMap((row) => nullableString(row, key) ?? []);
+    const stringIds = (value: unknown) =>
+      Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === 'string')
+        : [];
+    const rows = snapshotRecords(data.elementsDossier);
+    const [catalogue, demandes, inscriptions] = await Promise.all([
+      transaction.elementRequis.findMany({
+        where: {
+          id: {
+            in: [
+              ...idsOf([element], 'elementSubstitutId'),
+              ...idsOf(rows, 'elementSubstitutUtiliseId'),
+            ],
+          },
+        },
+        select: { id: true },
+      }),
+      transaction.demandeBourse.findMany({
+        where: { id: { in: idsOf(rows, 'demandeBourseId') } },
+        select: { id: true },
+      }),
+      transaction.inscription.findMany({
+        where: { id: { in: idsOf(rows, 'inscriptionId') } },
+        select: { id: true },
+      }),
+    ]);
+    const existe = new Set(
+      [...catalogue, ...demandes, ...inscriptions].map((row) => row.id),
+    );
+    const encoreLa = (row: SnapshotRecord, key: string) => {
+      const id = nullableString(row, key);
+      return id && existe.has(id) ? id : null;
+    };
+
+    await transaction.elementRequis.create({
+      data: {
+        id: elementId,
+        nom: stringValue(element, 'nom'),
+        categorie: stringValue(element, 'categorie'),
+        contexte: stringValue(element, 'contexte'),
+        niveauApplicable: stringValue(element, 'niveauApplicable'),
+        obligatoire: element.obligatoire !== false,
+        montantAttendu: element.montantAttendu ?? null,
+        elementSubstitutId: encoreLa(element, 'elementSubstitutId'),
+      } as never,
+    });
+
+    const restaurables = rows.filter(
+      (row) =>
+        encoreLa(row, 'demandeBourseId') ?? encoreLa(row, 'inscriptionId'),
+    );
+    await this.restoreElements(
+      transaction,
+      restaurables.map((row) => ({
+        ...row,
+        elementSubstitutUtiliseId: encoreLa(row, 'elementSubstitutUtiliseId'),
+      })),
+    );
+    for (const row of restaurables) {
+      const paiementIds = stringIds(row.paiementIds);
+      if (!paiementIds.length) continue;
+      await transaction.paiement.updateMany({
+        where: { id: { in: paiementIds }, elementDossierId: null },
+        data: { elementDossierId: stringValue(row, 'id') },
+      });
+    }
+    await transaction.elementRequis.updateMany({
+      where: {
+        id: { in: stringIds(data.substituePourIds) },
+        elementSubstitutId: null,
+      },
+      data: { elementSubstitutId: elementId },
+    });
+    await transaction.elementDossier.updateMany({
+      where: {
+        id: { in: stringIds(data.substitutUtiliseDansIds) },
+        statut: 'ATTENDU',
+        elementSubstitutUtiliseId: null,
+      },
+      data: { elementSubstitutUtiliseId: elementId, statut: 'SUBSTITUE' },
     });
   }
 
@@ -415,6 +535,8 @@ export class CorbeilleService {
         montant: payment.montant as string,
         datePaiement: requiredDate(payment, 'datePaiement'),
         typePaiement: stringValue(payment, 'typePaiement'),
+        motif: nullableString(payment, 'motif'),
+        saisiParNom: nullableString(payment, 'saisiParNom'),
       })) as never,
     });
   }

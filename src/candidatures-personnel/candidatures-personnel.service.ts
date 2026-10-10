@@ -24,7 +24,7 @@ type Statut = (typeof STATUTS)[number];
 export class CandidaturesPersonnelService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(dto: CreateCandidaturePersonnelDto) {
+  async create(dto: CreateCandidaturePersonnelDto, dateSaisie?: Date) {
     const nom = this.required(dto.nom, 'nom');
     const prenom = this.required(dto.prenom, 'prenom');
     const diplome = this.required(dto.diplome, 'diplome');
@@ -44,6 +44,7 @@ export class CandidaturesPersonnelService {
         elementsDossier: {
           create: elements.map((nomElement) => ({ nom: nomElement })),
         },
+        ...(dateSaisie ? { dateDepot: dateSaisie } : {}),
       },
       include: { elementsDossier: true },
     });

@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 
 export const TYPES_DOCUMENT = [
   'RECU_PAIEMENT',
+  'RECU_REMBOURSEMENT',
   'CERTIFICAT_BOURSE',
   'CERTIFICAT_INSCRIPTION',
   'BON_COMMANDE',

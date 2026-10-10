@@ -26,6 +26,8 @@ import { ComptabiliteModule } from './comptabilite/comptabilite.module';
 import { DocumentsModule } from './documents/documents.module';
 import { SauvegardesModule } from './sauvegardes/sauvegardes.module';
 import { AuditInterceptor } from './audit/audit.interceptor';
+import { VersionInterceptor } from './common/version.interceptor';
+import { SynchronisationModule } from './synchronisation/synchronisation.module';
 
 @Module({
   imports: [
@@ -51,6 +53,7 @@ import { AuditInterceptor } from './audit/audit.interceptor';
     ComptabiliteModule,
     DocumentsModule,
     SauvegardesModule,
+    SynchronisationModule,
   ],
   controllers: [AppController],
   providers: [
@@ -58,6 +61,7 @@ import { AuditInterceptor } from './audit/audit.interceptor';
     // L'audit enveloppe l'idempotence : il voit le résultat final de chaque écriture.
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
     { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },
+    { provide: APP_INTERCEPTOR, useClass: VersionInterceptor },
   ],
 })
 export class AppModule {}

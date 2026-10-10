@@ -26,7 +26,11 @@ type StatutRelanceValue = (typeof STATUTS_RELANCE)[number];
 export class ProspectsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(createDto: CreateProspectDto, creeParId: string) {
+  async create(
+    createDto: CreateProspectDto,
+    creeParId: string,
+    dateSaisie?: Date,
+  ) {
     const statutRelance = this.parseStatut(
       createDto.statutRelance || 'A_RELANCER',
     );
@@ -79,6 +83,7 @@ export class ProspectsService {
               tuteurPrenom: this.optionalString(createDto.tuteurPrenom),
               tuteurTelephone: this.optionalString(createDto.tuteurTelephone),
               creePar: { connect: { id: creeParId } },
+              ...(dateSaisie ? { dateEnregistrement: dateSaisie } : {}),
             },
           });
         }
@@ -224,6 +229,7 @@ export class ProspectsService {
     id: string,
     createDto: CreateProspectRelanceDto,
     utilisateurId: string,
+    dateSaisie?: Date,
   ) {
     const commentaire = this.requiredString(
       createDto.commentaire,
@@ -270,6 +276,7 @@ export class ProspectsService {
           intention,
           statutRelance,
           dateProchaineRelance,
+          ...(dateSaisie ? { date: dateSaisie } : {}),
         },
       });
 

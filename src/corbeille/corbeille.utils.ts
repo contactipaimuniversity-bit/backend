@@ -19,3 +19,20 @@ export function requiredDeletionReason(value: string | undefined) {
 export function toTrashSnapshot(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
+
+// Auteur d'une suppression, tel qu'il est affiché dans la corbeille.
+export async function trashAuthor(
+  transaction: Prisma.TransactionClient,
+  userId: string,
+) {
+  const author = await transaction.utilisateur.findUnique({
+    where: { id: userId },
+    select: { id: true, nom: true, prenom: true },
+  });
+  return {
+    supprimeParId: author?.id ?? null,
+    supprimeParNom:
+      [author?.prenom, author?.nom].filter(Boolean).join(' ') ||
+      'Utilisateur inconnu',
+  };
+}

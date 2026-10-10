@@ -254,26 +254,39 @@ export class ComptabiliteService {
         );
         for (const paiement of paiements) {
           if (existe.has(`PAIEMENT:${paiement.id}`)) continue;
+          // Un report déplace un versement entre deux obligations : la caisse ne bouge pas.
+          if (paiement.typePaiement === 'REPORT') continue;
           const personne =
             paiement.demandeBourse?.personne ?? paiement.inscription?.personne;
-          const montant = Number(paiement.montant);
+          // Un remboursement sort de la caisse et annule d'autant le produit constaté.
+          const rembourse = paiement.typePaiement === 'REMBOURSEMENT';
+          const montant = Math.abs(Number(paiement.montant));
+          const produit =
+            COMPTE_PRODUIT[
+              rembourse
+                ? paiement.demandeBourseId
+                  ? 'FRAIS_DEPOT'
+                  : 'FRAIS_INSCRIPTION'
+                : paiement.typePaiement
+            ] ?? '707';
           await this.enregistrer(transaction, {
             journal: 'CA',
             date: paiement.datePaiement,
             libelle:
-              `Encaissement ${personne ? `${personne.prenom} ${personne.nom}` : ''}`.trim(),
+              `${rembourse ? 'Remboursement' : 'Encaissement'} ${personne ? `${personne.prenom} ${personne.nom}` : ''}`.trim(),
             reference: paiement.id.slice(0, 8).toUpperCase(),
             sourceType: 'PAIEMENT',
             sourceId: paiement.id,
             creeParNom: SYSTEME,
-            lignes: [
-              { compte: '571', debit: montant, credit: 0 },
-              {
-                compte: COMPTE_PRODUIT[paiement.typePaiement] ?? '707',
-                debit: 0,
-                credit: montant,
-              },
-            ],
+            lignes: rembourse
+              ? [
+                  { compte: produit, debit: montant, credit: 0 },
+                  { compte: '571', debit: 0, credit: montant },
+                ]
+              : [
+                  { compte: '571', debit: montant, credit: 0 },
+                  { compte: produit, debit: 0, credit: montant },
+                ],
           });
           creees += 1;
         }

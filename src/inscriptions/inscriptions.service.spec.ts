@@ -211,3 +211,80 @@ describe('InscriptionsService.update', () => {
     );
   });
 });
+
+describe('InscriptionsService.findFinance', () => {
+  const dossier = (frais: unknown[]) => {
+    const updateMany = jest.fn().mockReturnValue('update');
+    const deleteMany = jest.fn().mockReturnValue('delete');
+    const prisma = {
+      inscription: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({
+            id: 'i',
+            niveau: 'L2',
+            elementsDossier: [],
+            paiements: [],
+          }),
+      },
+      elementRequis: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ id: 'l2', montantAttendu: 35000 }]),
+      },
+      elementDossier: {
+        createMany: jest.fn(),
+        findMany: jest.fn().mockResolvedValue(frais),
+        deleteMany,
+      },
+      paiement: { updateMany },
+      $transaction: jest.fn(),
+    } as unknown as PrismaService;
+    return { service: new InscriptionsService(prisma), updateMany, deleteMany };
+  };
+  const l1 = {
+    id: 'frais-l1',
+    montantAttendu: 30000,
+    elementRequis: { niveauApplicable: 'PREMIERE_ANNEE' },
+    paiements: [{ montant: 30000 }],
+  };
+  const l2 = {
+    id: 'frais-l2',
+    montantAttendu: 35000,
+    elementRequis: { niveauApplicable: 'DEUXIEME_ANNEE' },
+    paiements: [],
+  };
+
+  it('moves what was paid on a first-year fee to the second-year fee of an L2 enrollment', async () => {
+    const { service, updateMany, deleteMany } = dossier([l1, l2]);
+
+    await service.findFinance('i');
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { elementDossierId: { in: ['frais-l1'] } },
+      data: { elementDossierId: 'frais-l2' },
+    });
+    expect(deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['frais-l1'] } },
+    });
+  });
+
+  it('leaves the payment unassigned when two fees of the level could receive it', async () => {
+    const { service, updateMany } = dossier([l1, l2, { ...l2, id: 'doublon' }]);
+
+    await service.findFinance('i');
+
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { elementDossierId: null } }),
+    );
+  });
+
+  it('does not touch a dossier whose fees all match its level', async () => {
+    const { service, updateMany, deleteMany } = dossier([l2]);
+
+    await service.findFinance('i');
+
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(deleteMany).not.toHaveBeenCalled();
+  });
+});

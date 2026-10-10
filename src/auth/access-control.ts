@@ -60,6 +60,19 @@ export function requiredPermissionForRequest(
   // La liste des personnes sert à choisir le candidat d'un nouveau dossier.
   if (isRead && normalizedPath === '/personnes')
     return ['view:people', 'view:scholarships', 'view:enrollments'];
+  // Avant de créer une personne, tout formulaire vérifie qu'elle n'existe pas déjà.
+  if (isRead && normalizedPath === '/personnes/doublons')
+    return [
+      'view:people',
+      'view:scholarships',
+      'view:enrollments',
+      'view:prospects',
+    ];
+  // La photo se joint et se consulte depuis le formulaire ou la fiche d'un dossier.
+  if (/^\/personnes\/[^/]+\/photo$/.test(normalizedPath)) {
+    const mode = isRead ? 'view' : 'edit';
+    return [`${mode}:people`, `${mode}:scholarships`, `${mode}:enrollments`];
+  }
   if (
     isRead &&
     /^\/(demandes-bourse|inscriptions)\/[^/]+\/paiements$/.test(normalizedPath)

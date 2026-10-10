@@ -6,9 +6,12 @@ import {
   Param,
   Patch,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
+import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { MotifSuppressionDto } from '../corbeille/dto/motif-suppression.dto';
 import { CreateEcheanceDto } from './dto/create-echeance.dto';
 import { CreateTypeBourseDto } from './dto/create-type-bourse.dto';
 import { UpdateTypeBourseDto } from './dto/update-type-bourse.dto';
@@ -35,8 +38,12 @@ export class TypesBourseController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.typesBourseService.remove(id);
+  remove(
+    @Param('id') id: string,
+    @Body() body: MotifSuppressionDto | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.typesBourseService.remove(id, body?.motif, request.user.sub);
   }
 
   @Get(':id/echeances')

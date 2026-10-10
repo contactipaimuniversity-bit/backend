@@ -34,7 +34,12 @@ type StatutDemandeValue = (typeof STATUTS_DEMANDE)[number];
 export class DemandesBourseService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(createDto: CreateDemandeBourseDto, creeParId: string) {
+  // dateSaisie : heure réelle d'une saisie faite hors ligne (sinon, maintenant).
+  async create(
+    createDto: CreateDemandeBourseDto,
+    creeParId: string,
+    dateSaisie?: Date,
+  ) {
     const nouvellePersonne = createDto.nouvellePersonne;
     if (nouvellePersonne && createDto.personneId) {
       throw new BadRequestException(
@@ -103,7 +108,9 @@ export class DemandesBourseService {
           montantAttendu: element.montantAttendu,
           statut,
           dateFourniture:
-            statut === 'FOURNI' || statut === 'SUBSTITUE' ? new Date() : null,
+            statut === 'FOURNI' || statut === 'SUBSTITUE'
+              ? (dateSaisie ?? new Date())
+              : null,
           elementSubstitutUtiliseId:
             statut === 'SUBSTITUE' ? element.elementSubstitutId : null,
         };
@@ -135,6 +142,7 @@ export class DemandesBourseService {
                   nouvellePersonne.tuteurTelephone,
                 ),
                 creeParId,
+                ...(dateSaisie ? { dateEnregistrement: dateSaisie } : {}),
               },
               select: { id: true },
             })
@@ -152,6 +160,7 @@ export class DemandesBourseService {
           elementsDossier: {
             create: dossierElements,
           },
+          ...(dateSaisie ? { dateDepot: dateSaisie } : {}),
         },
         include: this.detailInclude(),
       });
@@ -171,6 +180,7 @@ export class DemandesBourseService {
             elementDossierId: element.id,
             montant: preparationPayment.montant,
             typePaiement: preparationPayment.typePaiement,
+            ...(dateSaisie ? { datePaiement: dateSaisie } : {}),
           },
         });
         return transaction.demandeBourse.findUnique({
