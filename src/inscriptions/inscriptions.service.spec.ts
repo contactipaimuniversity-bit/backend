@@ -5,6 +5,21 @@ jest.mock('../prisma/prisma.service', () => ({
   PrismaService: class PrismaService {},
 }));
 
+// Référentiels lus par le service : niveaux par défaut, aucune filière.
+const referentiel = (prisma: PrismaService) =>
+  Object.assign(
+    {
+      niveau: {
+        findMany: jest.fn().mockResolvedValue([
+          { code: 'L1', cycle: 'Licence', rang: 1, actif: true },
+          { code: 'L2', cycle: 'Licence', rang: 2, actif: true },
+        ]),
+      },
+      filiere: { findMany: jest.fn().mockResolvedValue([]) },
+    },
+    prisma,
+  ) as unknown as PrismaService;
+
 describe('InscriptionsService.create', () => {
   it('rejects an invalid initial payment before creating any records', async () => {
     const transaction = {
@@ -28,7 +43,7 @@ describe('InscriptionsService.create', () => {
           callback(transaction),
       ),
     } as unknown as PrismaService;
-    const service = new InscriptionsService(prisma);
+    const service = new InscriptionsService(referentiel(prisma));
 
     await expect(
       service.create(
@@ -77,7 +92,7 @@ describe('InscriptionsService.create', () => {
           callback(transaction),
       ),
     } as unknown as PrismaService;
-    const service = new InscriptionsService(prisma);
+    const service = new InscriptionsService(referentiel(prisma));
 
     await expect(
       service.create(
@@ -121,7 +136,7 @@ describe('InscriptionsService.create', () => {
           callback(transaction),
       ),
     } as unknown as PrismaService;
-    const service = new InscriptionsService(prisma);
+    const service = new InscriptionsService(referentiel(prisma));
 
     await service.create(
       {
@@ -163,12 +178,12 @@ describe('InscriptionsService.create', () => {
     });
   });
 
-  it('rejects enrollment levels other than L1 or L2', async () => {
+  it('rejects enrollment levels missing from the reference list', async () => {
     const transactionMock = jest.fn();
     const prisma = {
       $transaction: transactionMock,
     } as unknown as PrismaService;
-    const service = new InscriptionsService(prisma);
+    const service = new InscriptionsService(referentiel(prisma));
 
     await expect(
       service.create(
@@ -180,7 +195,7 @@ describe('InscriptionsService.create', () => {
         },
         'agent-id',
       ),
-    ).rejects.toThrow('niveau doit etre L1 ou L2');
+    ).rejects.toThrow('niveau doit etre parmi : L1, L2');
     expect(transactionMock).not.toHaveBeenCalled();
   });
 });
@@ -201,7 +216,7 @@ describe('InscriptionsService.update', () => {
       },
       demandeBourse: { findUnique: demandeFindUnique },
     } as unknown as PrismaService;
-    const service = new InscriptionsService(prisma);
+    const service = new InscriptionsService(referentiel(prisma));
 
     await service.update('inscription-id', { statut: 'COMPLETE' });
 
@@ -218,14 +233,12 @@ describe('InscriptionsService.findFinance', () => {
     const deleteMany = jest.fn().mockReturnValue('delete');
     const prisma = {
       inscription: {
-        findUnique: jest
-          .fn()
-          .mockResolvedValue({
-            id: 'i',
-            niveau: 'L2',
-            elementsDossier: [],
-            paiements: [],
-          }),
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'i',
+          niveau: 'L2',
+          elementsDossier: [],
+          paiements: [],
+        }),
       },
       elementRequis: {
         findMany: jest
@@ -240,7 +253,11 @@ describe('InscriptionsService.findFinance', () => {
       paiement: { updateMany },
       $transaction: jest.fn(),
     } as unknown as PrismaService;
-    return { service: new InscriptionsService(prisma), updateMany, deleteMany };
+    return {
+      service: new InscriptionsService(referentiel(prisma)),
+      updateMany,
+      deleteMany,
+    };
   };
   const l1 = {
     id: 'frais-l1',

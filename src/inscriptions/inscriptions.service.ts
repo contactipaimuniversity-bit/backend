@@ -5,7 +5,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { $Enums } from '../../generated/prisma/client';
+import { normaliser } from '../academique/academique.rules';
+import { niveauxApplicables, niveauxConnus } from '../academique/niveaux';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  nomUtilisateur,
+  numeroRecu,
+  parseModePaiement,
+} from '../paiements/encaissement';
 import { CreateInscriptionDto } from './dto/create-inscription.dto';
 import { SearchInscriptionsDto } from './dto/search-inscriptions.dto';
 import { UpdateInscriptionElementDto } from './dto/update-inscription-element.dto';
@@ -53,8 +60,12 @@ export class InscriptionsService {
       createDto.anneeScolaire,
       'anneeScolaire',
     );
-    const niveau = this.parseNiveau(createDto.niveau);
-    const filiere = this.requiredString(createDto.filiere, 'filiere');
+    const niveau = await this.parseNiveau(createDto.niveau);
+    const { filiere, filiereId } = await this.resoudreFiliere(
+      createDto.filiere,
+      createDto.filiereId,
+    );
+    const applicables = await this.niveauApplicable(niveau);
     const demandeBourseId = this.optionalString(createDto.demandeBourseId);
 
     if (!nouvellePersonne && !viaBourse && !personneId) {
@@ -74,7 +85,7 @@ export class InscriptionsService {
       const catalogue = await transaction.elementRequis.findMany({
         where: {
           contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] },
-          niveauApplicable: this.niveauApplicable(niveau),
+          niveauApplicable: applicables,
         },
       });
       const statuses = createDto.preparation?.statuses ?? {};
@@ -148,6 +159,7 @@ export class InscriptionsService {
           anneeScolaire,
           niveau,
           filiere,
+          filiereId,
           viaBourse,
           demandeBourseId,
           elementsDossier: {
@@ -172,6 +184,11 @@ export class InscriptionsService {
             elementDossierId: element.id,
             montant: preparationPayment.montant,
             typePaiement: preparationPayment.typePaiement,
+            modePaiement: parseModePaiement(
+              createDto.preparation?.modePaiement,
+            ),
+            saisiParNom: await nomUtilisateur(transaction, creeParId),
+            numeroRecu: await numeroRecu(transaction),
             ...(dateSaisie ? { datePaiement: dateSaisie } : {}),
           },
         });
@@ -444,6 +461,7 @@ export class InscriptionsService {
       anneeScolaire?: string;
       niveau?: string;
       filiere?: string;
+      filiereId?: string | null;
       viaBourse?: boolean;
       demandeBourseId?: string | null;
       statut?: StatutInscriptionValue;
@@ -462,10 +480,20 @@ export class InscriptionsService {
       );
     }
     if (updateDto.niveau !== undefined) {
-      data.niveau = this.parseNiveau(updateDto.niveau);
+      data.niveau = await this.parseNiveau(updateDto.niveau);
     }
-    if (updateDto.filiere !== undefined) {
-      data.filiere = this.requiredString(updateDto.filiere, 'filiere');
+    if (updateDto.filiere !== undefined || updateDto.filiereId) {
+      const lien = await this.resoudreFiliere(
+        updateDto.filiere,
+        updateDto.filiereId,
+      );
+      // Un étudiant déjà en classe garde la filière de sa classe.
+      if (current.classe && lien.filiereId !== current.classe.filiereId)
+        throw new ConflictException(
+          "Cet étudiant est déjà affecté à une classe : retirez-le d'abord de la classe pour changer sa filière",
+        );
+      data.filiere = lien.filiere;
+      data.filiereId = lien.filiereId;
     }
     if (updateDto.viaBourse !== undefined) {
       data.viaBourse = updateDto.viaBourse;
@@ -588,7 +616,7 @@ export class InscriptionsService {
     const catalogue = await this.prisma.elementRequis.findMany({
       where: {
         contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] },
-        niveauApplicable: this.niveauApplicable(inscription.niveau),
+        niveauApplicable: await this.niveauApplicable(inscription.niveau),
       },
       select: { id: true, montantAttendu: true },
     });
@@ -609,7 +637,7 @@ export class InscriptionsService {
   // coup) : on le retire, et ce qui a déjà été payé dessus est reporté sur le
   // frais du bon niveau.
   private async retirerFraisHorsNiveau(id: string, niveau: string) {
-    const niveaux = this.niveauApplicable(niveau).in;
+    const niveaux = (await this.niveauApplicable(niveau)).in;
     const frais = await this.prisma.elementDossier.findMany({
       where: {
         inscriptionId: id,
@@ -699,23 +727,64 @@ export class InscriptionsService {
     } as const;
   }
 
-  private niveauApplicable(niveau: string): {
+  // Pièces et frais du niveau, d'après son rang dans le cycle.
+  private async niveauApplicable(niveau: string): Promise<{
     in: $Enums.NiveauApplicable[];
-  } {
-    return niveau === 'L1'
-      ? { in: ['PREMIERE_ANNEE', 'TOUS'] }
-      : { in: ['DEUXIEME_ANNEE', 'DEUXIEME_ANNEE_PLUS', 'TOUS'] };
+  }> {
+    const niveaux = await niveauxConnus(this.prisma);
+    const rang = niveaux.find((item) => item.code === niveau)?.rang ?? 2;
+    return { in: niveauxApplicables(rang) };
   }
 
-  private parseNiveau(value: string): 'L1' | 'L2' {
+  // Le niveau doit exister dans le référentiel (L1, L2, L3, M1…).
+  private async parseNiveau(value: string): Promise<string> {
     const normalized = this.requiredString(value, 'niveau')
       .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[̀-ͯ]/g, '')
       .toUpperCase()
       .replace(/[\s-]+/g, '_');
-    if (['L1', '1', 'PREMIERE_ANNEE'].includes(normalized)) return 'L1';
-    if (['L2', '2', 'DEUXIEME_ANNEE'].includes(normalized)) return 'L2';
-    throw new BadRequestException('niveau doit etre L1 ou L2');
+    const niveaux = (await niveauxConnus(this.prisma)).filter(
+      (niveau) => niveau.actif,
+    );
+    const alias: Record<string, string> = {
+      '1': 'L1',
+      PREMIERE_ANNEE: 'L1',
+      '2': 'L2',
+      DEUXIEME_ANNEE: 'L2',
+    };
+    const code = alias[normalized] ?? normalized;
+    const niveau = niveaux.find((item) => item.code.toUpperCase() === code);
+    if (!niveau)
+      throw new BadRequestException(
+        `niveau doit etre parmi : ${niveaux.map((item) => item.code).join(', ')}`,
+      );
+    return niveau.code;
+  }
+
+  // Rattache l'inscription à une filière du référentiel : par son identifiant,
+  // sinon par son nom ou son code, sans tenir compte de la casse ni des accents.
+  // Une filière inconnue reste un texte libre, à rapprocher plus tard.
+  private async resoudreFiliere(
+    texte: string | undefined,
+    filiereId: string | null | undefined,
+  ): Promise<{ filiere: string; filiereId: string | null }> {
+    if (filiereId) {
+      const filiere = await this.prisma.filiere.findUnique({
+        where: { id: filiereId },
+      });
+      if (!filiere) throw new NotFoundException('Filière introuvable');
+      return { filiere: filiere.nom, filiereId: filiere.id };
+    }
+    const saisie = this.requiredString(texte, 'filiere').replace(/\s+/g, ' ');
+    const cible = normaliser(saisie);
+    const filieres = await this.prisma.filiere.findMany();
+    const trouvee = filieres.find(
+      (filiere) =>
+        normaliser(filiere.nom) === cible || normaliser(filiere.code) === cible,
+    );
+    return trouvee
+      ? { filiere: trouvee.nom, filiereId: trouvee.id }
+      : { filiere: saisie, filiereId: null };
   }
 
   private async ensureBourseCoherence(
@@ -777,6 +846,7 @@ export class InscriptionsService {
         niveau: true,
         viaBourse: true,
         demandeBourseId: true,
+        classe: { select: { filiereId: true } },
       },
     });
     if (!inscription) {

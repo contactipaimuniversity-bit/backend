@@ -40,8 +40,20 @@ export class StatistiquesAcademiquesService {
         viaBourse: true,
         classeId: true,
         personne: { select: { sexe: true } },
-        classe: { select: { filiere: { select: { nom: true } } } },
+        filiereRef: {
+          select: { nom: true, pole: { select: { nom: true } } },
+        },
+        classe: {
+          select: {
+            filiere: { select: { nom: true, pole: { select: { nom: true } } } },
+          },
+        },
       },
+    });
+    // Crédits encore dus par les étudiants admis avec dettes cette année-là.
+    const dettes = await this.prisma.creditUE.findMany({
+      where: { statut: 'DETTE', annee: annee.libelle },
+      select: { personneId: true, credits: true },
     });
     const actifs = inscriptions.filter(
       (inscription) => inscription.statut !== 'ABANDONNEE',
@@ -98,6 +110,7 @@ export class StatistiquesAcademiquesService {
         classeId: classe.id,
         classe: classe.nom,
         filiere: classe.filiere.nom,
+        pole: classe.filiere.pole?.nom ?? 'Sans pôle',
         niveau: classe.niveau,
         effectif: classe.effectif,
         semestre1: ligne(1),
@@ -105,6 +118,21 @@ export class StatistiquesAcademiquesService {
         annuel: ligne(0),
       };
     });
+
+    // Réussite annuelle regroupée par pôle.
+    const parPole = new Map<string, { effectif: number; reussis: number }>();
+    for (const ligne of reussite) {
+      if (!ligne.annuel) continue;
+      const total = parPole.get(ligne.pole) ?? { effectif: 0, reussis: 0 };
+      total.effectif += ligne.annuel.effectif;
+      total.reussis += ligne.annuel.reussis;
+      parPole.set(ligne.pole, total);
+    }
+    const reussiteParPole = [...parPole.entries()].map(([pole, total]) => ({
+      pole,
+      ...total,
+      taux: pourcentage(total.reussis, total.effectif),
+    }));
 
     // Assiduité et avancement des programmes.
     const cours = await this.prisma.cours.findMany({
@@ -166,12 +194,24 @@ export class StatistiquesAcademiquesService {
         sansClasse: actifs.filter((inscription) => !inscription.classeId)
           .length,
         parNiveau: repartition(actifs, (inscription) => inscription.niveau),
-        // La filière de la classe fait foi ; à défaut, celle saisie à l'inscription.
+        // La filière de la classe fait foi, puis celle du référentiel ; à défaut, le texte saisi.
         parFiliere: repartition(
           actifs,
           (inscription) =>
-            inscription.classe?.filiere.nom ?? inscription.filiere.trim(),
+            inscription.classe?.filiere.nom ??
+            inscription.filiereRef?.nom ??
+            inscription.filiere.trim(),
         ),
+        parPole: repartition(
+          actifs,
+          (inscription) =>
+            (inscription.classe?.filiere ?? inscription.filiereRef)?.pole
+              ?.nom ?? 'Sans pôle',
+        ),
+        // Inscriptions dont la filière n'est pas encore rattachée au référentiel.
+        sansFiliere: actifs.filter(
+          (inscription) => !inscription.classeId && !inscription.filiereRef,
+        ).length,
         parSexe: repartition(actifs, (inscription) =>
           inscription.personne.sexe === 'F'
             ? 'Femmes'
@@ -181,6 +221,12 @@ export class StatistiquesAcademiquesService {
         ),
       },
       reussite,
+      reussiteParPole,
+      dettes: {
+        etudiants: new Set(dettes.map((dette) => dette.personneId)).size,
+        unites: dettes.length,
+        credits: dettes.reduce((total, dette) => total + dette.credits, 0),
+      },
       assiduite: {
         heuresTenues: Math.round(minutesTenues / 60),
         tauxAbsence: pourcentage(minutesAbsence, minutesEtudiants),

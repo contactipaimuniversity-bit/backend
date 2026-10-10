@@ -1,7 +1,6 @@
 // Calcul des résultats, sans accès à la base : matière, unité d'enseignement,
 // semestre, année. Toutes les moyennes sont sur 20, arrondies au centième.
 
-export const NIVEAUX = ['L1', 'L2'] as const;
 export const SEMESTRES = [1, 2] as const;
 export const TYPES_EVALUATION = ['CONTROLE', 'EXAMEN', 'RATTRAPAGE'] as const;
 
@@ -252,6 +251,48 @@ export function chevauche(
   b: { debut: number; fin: number },
 ): boolean {
   return a.debut < b.fin && b.debut < a.fin;
+}
+
+// Nombre de lettres à changer pour passer d'un texte à l'autre.
+export function distance(a: string, b: string): number {
+  let ligne = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    const suivante = [i];
+    for (let j = 1; j <= b.length; j += 1)
+      suivante[j] = Math.min(
+        ligne[j] + 1,
+        suivante[j - 1] + 1,
+        ligne[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    ligne = suivante;
+  }
+  return ligne[b.length];
+}
+
+// Filière du référentiel la plus proche d'un texte saisi à la main : même nom
+// ou même code, sinon une faute de frappe près (« Genie civl » → Génie Civil).
+export function filiereProche<T extends { nom: string; code: string }>(
+  texte: string,
+  filieres: T[],
+): T | null {
+  const cible = normaliser(texte);
+  if (!cible) return null;
+  const exacte = filieres.find(
+    (filiere) =>
+      normaliser(filiere.nom) === cible || normaliser(filiere.code) === cible,
+  );
+  if (exacte) return exacte;
+  const tolerance = Math.max(1, Math.floor(cible.length / 6));
+  const proches = filieres
+    .map((filiere) => ({
+      filiere,
+      ecart: distance(cible, normaliser(filiere.nom)),
+    }))
+    .filter((item) => item.ecart <= tolerance)
+    .sort((a, b) => a.ecart - b.ecart);
+  // Deux filières aussi proches l'une que l'autre : on ne tranche pas.
+  if (!proches.length || proches[1]?.ecart === proches[0].ecart) return null;
+  return proches[0].filiere;
 }
 
 // Texte comparé sans casse, accents ni espaces superflus (rapprochement des filières saisies à la main).

@@ -55,6 +55,7 @@ export class AuthService {
         posteId: utilisateur.posteId,
         poste: utilisateur.poste,
         permissions: utilisateur.permissions,
+        photoUrl: utilisateur.photoUrl,
       },
     };
   }

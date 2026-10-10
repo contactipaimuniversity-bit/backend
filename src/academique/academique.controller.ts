@@ -58,9 +58,54 @@ export class AcademiqueController {
     return this.structure.updateAnnee(id, body);
   }
 
+  @Get('niveaux')
+  niveaux() {
+    return this.structure.niveaux();
+  }
+
+  @Post('niveaux')
+  createNiveau(@Body() body: Body) {
+    return this.structure.createNiveau(body);
+  }
+
+  @Patch('niveaux/:id')
+  updateNiveau(@Param('id') id: string, @Body() body: Body) {
+    return this.structure.updateNiveau(id, body);
+  }
+
+  @Get('poles')
+  poles() {
+    return this.structure.poles();
+  }
+
+  @Post('poles/structure-type')
+  chargerStructureType() {
+    return this.structure.chargerStructureType();
+  }
+
+  @Post('poles')
+  createPole(@Body() body: Body) {
+    return this.structure.createPole(body);
+  }
+
+  @Patch('poles/:id')
+  updatePole(@Param('id') id: string, @Body() body: Body) {
+    return this.structure.updatePole(id, body);
+  }
+
   @Get('filieres')
   filieres() {
     return this.structure.filieres();
+  }
+
+  @Get('filieres/rapprochement')
+  filieresARapprocher() {
+    return this.structure.filieresARapprocher();
+  }
+
+  @Post('filieres/rapprochement')
+  rapprocher(@Body() body: Body) {
+    return this.structure.rapprocher(body);
   }
 
   @Post('filieres')
@@ -89,8 +134,11 @@ export class AcademiqueController {
   }
 
   @Get('classes')
-  classes(@Query('anneeId') anneeId?: string) {
-    return this.structure.classes(anneeId);
+  classes(
+    @Query('anneeId') anneeId?: string,
+    @Query('poleId') poleId?: string,
+  ) {
+    return this.structure.classes(anneeId, poleId);
   }
 
   @Post('classes')
@@ -125,8 +173,29 @@ export class AcademiqueController {
   maquette(
     @Query('filiereId') filiereId: string,
     @Query('niveau') niveau: string,
+    @Query('anneeId') anneeId?: string,
   ) {
-    return this.structure.maquette(filiereId, niveau);
+    return this.structure.maquette(filiereId, niveau, anneeId);
+  }
+
+  @Get('maquettes')
+  maquettes(@Query('anneeId') anneeId?: string) {
+    return this.structure.maquettes(anneeId);
+  }
+
+  @Post('maquette/copier')
+  copierMaquette(@Body() body: Body) {
+    return this.structure.copierMaquette(body);
+  }
+
+  @Post('maquette/reconduire')
+  reconduireMaquettes(@Body() body: Body) {
+    return this.structure.reconduireMaquettes(body);
+  }
+
+  @Post('maquette/importer')
+  importerMaquette(@Body() body: Body) {
+    return this.structure.importerMaquette(body);
   }
 
   @Post('unites')
@@ -247,6 +316,11 @@ export class ScolariteController {
 export class NotesController {
   constructor(private readonly evaluations: EvaluationsService) {}
 
+  @Get('calendrier')
+  calendrier(@Query() query: { anneeId?: string; du?: string; au?: string }) {
+    return this.evaluations.calendrier(query);
+  }
+
   @Get('cours/:coursId')
   grille(
     @Param('coursId') coursId: string,
@@ -342,6 +416,30 @@ export class DeliberationsController {
   @Get('statistiques')
   stats(@Query('anneeId') anneeId?: string) {
     return this.statistiques.synthese(anneeId);
+  }
+
+  @Get('dettes')
+  dettes(@Query() query: { statut?: string; q?: string }) {
+    return this.deliberations.dettes(query);
+  }
+
+  @Post('dettes/:id/rattrapage')
+  rattraper(
+    @Param('id') id: string,
+    @Body() body: Body,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.deliberations.rattraper(id, body, acteurDe(request));
+  }
+
+  @Get('releves/:inscriptionId')
+  releve(@Param('inscriptionId') inscriptionId: string) {
+    return this.deliberations.releve(inscriptionId);
+  }
+
+  @Get('classes/:classeId/releves')
+  releves(@Param('classeId') classeId: string) {
+    return this.deliberations.releves(classeId);
   }
 
   @Get('classes/:classeId/semestres/:semestre')

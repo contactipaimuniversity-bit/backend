@@ -17,6 +17,7 @@ import {
   RembourserTropPercuDto,
   ReporterTropPercuDto,
 } from './dto/trop-percu.dto';
+import { AnnulerPaiementDto } from './dto/annuler-paiement.dto';
 import { CreatePaiementDto } from './dto/create-paiement.dto';
 import { AssignPaiementDto } from './dto/assign-paiement.dto';
 import { PaiementsService } from './paiements.service';
@@ -31,7 +32,11 @@ export class PaiementsController {
     @Body() createDto: CreatePaiementDto,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.paiementsService.create(createDto, saisieLocale(request));
+    return this.paiementsService.create(
+      createDto,
+      saisieLocale(request),
+      acteurDe(request).nom,
+    );
   }
 
   @Get('paiements')
@@ -47,6 +52,16 @@ export class PaiementsController {
   @Patch('paiements/:id/affectation')
   assignToElement(@Param('id') id: string, @Body() dto: AssignPaiementDto) {
     return this.paiementsService.assignToElement(id, dto.elementDossierId);
+  }
+
+  // Encaissement saisi par erreur : il est neutralisé par une ligne inverse, jamais effacé.
+  @Post('paiements/:id/annulation')
+  annuler(
+    @Param('id') id: string,
+    @Body() dto: AnnulerPaiementDto | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.paiementsService.annuler(id, dto ?? {}, acteurDe(request).nom);
   }
 
   // Régularisation d'un trop-perçu : report sur une autre obligation, ou remboursement.

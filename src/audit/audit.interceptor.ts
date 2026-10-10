@@ -93,6 +93,8 @@ export class AuditInterceptor implements NestInterceptor {
       [/^\/utilisateurs\/[^/]+(\/acces)?$/, this.prisma.utilisateur],
       [/^\/paiements\/[^/]+\/affectation$/, this.prisma.paiement],
       [/^\/corbeille\/[^/]+$/, this.prisma.elementCorbeille],
+      [/^\/academique\/poles\/[^/]+$/, this.prisma.pole],
+      [/^\/academique\/filieres\/[^/]+$/, this.prisma.filiere],
       [/^\/depenses\/[^/]+$/, this.prisma.depense],
       [/^\/finances\/categories\/[^/]+$/, this.prisma.categorieDepense],
       [/^\/finances\/fournisseurs\/[^/]+$/, this.prisma.fournisseur],

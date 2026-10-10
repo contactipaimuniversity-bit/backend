@@ -11,6 +11,7 @@ export class CreateDemandeBourseDto {
     statuses?: Record<string, string>;
     montant?: string | number;
     typePaiement?: string;
+    modePaiement?: string;
     elementId?: string;
   };
 }

@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
+import { CloudinaryService } from '../fichiers/cloudinary.service';
+import type { FichierRecu } from '../fichiers/cloudinary.service';
 import { CreateUtilisateurDto } from './dto/create-utilisateur.dto';
 import { UpdateProfilDto } from './dto/update-profil.dto';
 import {
@@ -23,7 +25,10 @@ const ROLES = ['admin', 'employe'] as const;
 
 @Injectable()
 export class UtilisateursService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cloudinary: CloudinaryService,
+  ) {}
 
   async create(createDto: CreateUtilisateurDto) {
     const nom = createDto.nom?.trim();
@@ -77,6 +82,7 @@ export class UtilisateursService {
           role: true,
           posteId: true,
           permissions: true,
+          photoUrl: true,
           poste: { select: { id: true, nom: true } },
         },
       });
@@ -101,6 +107,7 @@ export class UtilisateursService {
         role: true,
         posteId: true,
         permissions: true,
+        photoUrl: true,
         poste: { select: { id: true, nom: true } },
       },
       orderBy: { nom: 'asc' },
@@ -180,6 +187,7 @@ export class UtilisateursService {
         role: true,
         posteId: true,
         permissions: true,
+        photoUrl: true,
         poste: { select: { id: true, nom: true } },
       },
     });
@@ -199,6 +207,83 @@ export class UtilisateursService {
         normalized.add(`view:${permission.slice(5)}`);
     }
     return [...normalized];
+  }
+
+  // ---------- Photo de profil ----------
+
+  private profil(
+    id: string,
+    data: { photoUrl: string | null; photoPublicId: string | null },
+  ) {
+    return this.prisma.utilisateur.update({
+      where: { id },
+      data,
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        email: true,
+        role: true,
+        posteId: true,
+        poste: { select: { id: true, nom: true } },
+        permissions: true,
+        photoUrl: true,
+      },
+    });
+  }
+
+  async definirPhoto(id: string, fichier: FichierRecu | undefined) {
+    const utilisateur = await this.prisma.utilisateur.findUnique({
+      where: { id },
+      select: { photoPublicId: true },
+    });
+    if (!utilisateur) throw new NotFoundException('Utilisateur introuvable');
+    const recu = this.cloudinary.verifier(fichier, 'Photo');
+    if (!recu.mimetype.startsWith('image/'))
+      throw new BadRequestException(
+        'Photo : seules les images JPG, PNG ou WEBP sont acceptées',
+      );
+    const heberge = await this.cloudinary.envoyer(
+      recu,
+      `ipaim/utilisateurs/${id}`,
+    );
+    const resultat = await this.profil(id, {
+      photoUrl: heberge.url,
+      photoPublicId: heberge.publicId,
+    });
+    if (utilisateur.photoPublicId)
+      void this.cloudinary.supprimer(utilisateur.photoPublicId, 'image');
+    return resultat;
+  }
+
+  async lirePhoto(id: string) {
+    const utilisateur = await this.prisma.utilisateur.findUnique({
+      where: { id },
+      select: { photoUrl: true, photoPublicId: true },
+    });
+    if (!utilisateur?.photoUrl || !utilisateur.photoPublicId)
+      throw new NotFoundException('Aucune photo pour cet utilisateur');
+    const format =
+      /\.(jpe?g|png|webp)$/i.exec(utilisateur.photoUrl)?.[1] ?? 'jpg';
+    return this.cloudinary.telechargerImage(
+      utilisateur.photoPublicId,
+      format.toLowerCase(),
+    );
+  }
+
+  async retirerPhoto(id: string) {
+    const utilisateur = await this.prisma.utilisateur.findUnique({
+      where: { id },
+      select: { photoPublicId: true },
+    });
+    if (!utilisateur) throw new NotFoundException('Utilisateur introuvable');
+    const resultat = await this.profil(id, {
+      photoUrl: null,
+      photoPublicId: null,
+    });
+    if (utilisateur.photoPublicId)
+      void this.cloudinary.supprimer(utilisateur.photoPublicId, 'image');
+    return resultat;
   }
 
   async updateProfile(id: string, dto: UpdateProfilDto) {
@@ -240,6 +325,7 @@ export class UtilisateursService {
           posteId: true,
           poste: { select: { id: true, nom: true } },
           permissions: true,
+          photoUrl: true,
         },
       });
     } catch (error) {

@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { isUniqueConstraintViolation } from '../common/prisma-errors';
 import { PrismaService } from '../prisma/prisma.service';
+import { ComptabiliteService } from '../comptabilite/comptabilite.service';
 import {
   montantRetenu,
   parseDate,
@@ -40,7 +41,10 @@ type Client = PrismaService | Transaction;
 
 @Injectable()
 export class FinancesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly comptabilite: ComptabiliteService,
+  ) {}
 
   private money(value: number): string {
     return roundMoney(value).toFixed(2);
@@ -312,6 +316,8 @@ export class FinancesService {
         throw new ConflictException(
           `${enCours} dépense(s) de cet exercice sont encore en cours : terminez-les ou annulez-les avant la clôture`,
         );
+      // Les opérations pas encore passées en comptabilité y entrent avant la fermeture.
+      await this.comptabilite.synchroniser();
     }
     return this.prisma.exerciceBudgetaire.update({
       where: { id },

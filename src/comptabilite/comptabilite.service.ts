@@ -140,13 +140,23 @@ export class ComptabiliteService {
         throw new BadRequestException(
           `Le compte ${ligne.compte} n'existe pas dans le plan comptable`,
         );
-    const exercice = await transaction.exerciceBudgetaire.findFirst({
-      where: {
-        dateDebut: { lte: ecriture.date },
-        dateFin: { gte: ecriture.date },
-      },
-    });
-    const cle = `EC-${ecriture.date.getUTCFullYear()}`;
+    const exerciceDe = (jour: Date) =>
+      transaction.exerciceBudgetaire.findFirst({
+        where: { dateDebut: { lte: jour }, dateFin: { gte: jour } },
+      });
+    let date = ecriture.date;
+    let libelle = ecriture.libelle;
+    let exercice = await exerciceDe(date);
+    // Un exercice clôturé ne reçoit plus rien : une opération automatique qui
+    // y tombe s'inscrit au jour de sa prise en compte, avec sa date d'origine.
+    if (exercice?.cloture && ecriture.sourceType !== 'MANUELLE') {
+      libelle = `${libelle} (opération du ${date.toLocaleDateString('fr-FR')}, exercice clôturé)`;
+      date = new Date();
+      exercice = await exerciceDe(date);
+      // Clôturé avant son terme : l'écriture reste hors exercice.
+      if (exercice?.cloture) exercice = null;
+    }
+    const cle = `EC-${date.getUTCFullYear()}`;
     const sequence = await transaction.sequenceNumero.upsert({
       where: { cle },
       create: { cle, valeur: 1 },
@@ -156,8 +166,8 @@ export class ComptabiliteService {
       data: {
         numero: `${cle}-${String(sequence.valeur).padStart(6, '0')}`,
         journal: ecriture.journal,
-        date: ecriture.date,
-        libelle: ecriture.libelle.slice(0, 200),
+        date,
+        libelle: libelle.slice(0, 200),
         reference: ecriture.reference ?? null,
         sourceType: ecriture.sourceType,
         sourceId: ecriture.sourceId ?? null,
@@ -249,9 +259,21 @@ export class ComptabiliteService {
             inscription: { include: { personne: true } },
           },
         });
-        const paiementsConnus = new Set(
-          paiements.map((paiement) => paiement.id),
+        const paiementsConnus = new Map(
+          paiements.map((paiement) => [paiement.id, paiement]),
         );
+        // Ce qui avait été encaissé sur chaque obligation : un remboursement
+        // diminue ce produit-là, pas un produit deviné d'après le dossier.
+        const produitParObligation = new Map<string, string>();
+        for (const paiement of paiements)
+          if (
+            paiement.elementDossierId &&
+            paiement.typePaiement in COMPTE_PRODUIT
+          )
+            produitParObligation.set(
+              paiement.elementDossierId,
+              paiement.typePaiement,
+            );
         for (const paiement of paiements) {
           if (existe.has(`PAIEMENT:${paiement.id}`)) continue;
           // Un report déplace un versement entre deux obligations : la caisse ne bouge pas.
@@ -260,31 +282,45 @@ export class ComptabiliteService {
             paiement.demandeBourse?.personne ?? paiement.inscription?.personne;
           // Un remboursement sort de la caisse et annule d'autant le produit constaté.
           const rembourse = paiement.typePaiement === 'REMBOURSEMENT';
+          // Une annulation contre-passe l'encaissement saisi par erreur, sur le même produit.
+          const annule = paiement.typePaiement === 'ANNULATION';
+          const sortie = rembourse || annule;
+          const origine = paiementsConnus.get(paiement.annulePaiementId ?? '');
           const montant = Math.abs(Number(paiement.montant));
           const produit =
             COMPTE_PRODUIT[
-              rembourse
-                ? paiement.demandeBourseId
-                  ? 'FRAIS_DEPOT'
-                  : 'FRAIS_INSCRIPTION'
-                : paiement.typePaiement
+              annule && origine
+                ? origine.typePaiement
+                : sortie
+                  ? (produitParObligation.get(
+                      paiement.elementDossierId ?? '',
+                    ) ??
+                    (paiement.demandeBourseId
+                      ? 'FRAIS_DEPOT'
+                      : 'FRAIS_INSCRIPTION'))
+                  : paiement.typePaiement
             ] ?? '707';
+          // Espèces, banque ou mobile money : le compte suit le mode du paiement.
+          const { compte: caisse, journal } = tresorerie(
+            (annule ? origine?.modePaiement : paiement.modePaiement) ??
+              'ESPECES',
+          );
           await this.enregistrer(transaction, {
-            journal: 'CA',
+            journal,
             date: paiement.datePaiement,
             libelle:
-              `${rembourse ? 'Remboursement' : 'Encaissement'} ${personne ? `${personne.prenom} ${personne.nom}` : ''}`.trim(),
+              `${annule ? "Annulation d'encaissement" : rembourse ? 'Remboursement' : 'Encaissement'} ${personne ? `${personne.prenom} ${personne.nom}` : ''}`.trim(),
             reference: paiement.id.slice(0, 8).toUpperCase(),
             sourceType: 'PAIEMENT',
             sourceId: paiement.id,
             creeParNom: SYSTEME,
-            lignes: rembourse
+            lignes: sortie
               ? [
                   { compte: produit, debit: montant, credit: 0 },
-                  { compte: '571', debit: 0, credit: montant },
+                  { compte: caisse, debit: 0, credit: montant },
                 ]
               : [
-                  { compte: '571', debit: montant, credit: 0 },
+                  { compte: caisse, debit: montant, credit: 0 },
                   { compte: produit, debit: 0, credit: montant },
                 ],
           });

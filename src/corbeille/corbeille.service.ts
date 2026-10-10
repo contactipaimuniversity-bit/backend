@@ -537,6 +537,9 @@ export class CorbeilleService {
         typePaiement: stringValue(payment, 'typePaiement'),
         motif: nullableString(payment, 'motif'),
         saisiParNom: nullableString(payment, 'saisiParNom'),
+        annulePaiementId: nullableString(payment, 'annulePaiementId'),
+        modePaiement: nullableString(payment, 'modePaiement'),
+        numeroRecu: nullableString(payment, 'numeroRecu'),
       })) as never,
     });
   }

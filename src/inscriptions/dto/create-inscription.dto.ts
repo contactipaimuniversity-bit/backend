@@ -6,6 +6,8 @@ export class CreateInscriptionDto {
   anneeScolaire!: string;
   niveau!: string;
   filiere!: string;
+  // Filière du référentiel ; à défaut, le texte saisi est rapproché par son nom.
+  filiereId?: string;
   viaBourse?: boolean;
   demandeBourseId?: string;
   confirmerDemandeEnCours?: boolean;
@@ -13,6 +15,7 @@ export class CreateInscriptionDto {
     statuses?: Record<string, string>;
     montant?: string | number;
     typePaiement?: string;
+    modePaiement?: string;
     elementId?: string;
   };
 }

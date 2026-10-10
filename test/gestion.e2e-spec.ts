@@ -554,7 +554,7 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
 
     for (const [code, a, b, c] of [
       ['ALGO', 12, 14, 5],
-      ['ANG', 15, 9, 8],
+      ['ANG', 15, 9, 12],
     ] as const) {
       const id = await evaluation('scolarite', code, 'EXAMEN');
       await noter('scolarite', id, a, b, c).expect(200);
@@ -587,7 +587,7 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       rang: 2,
       decision: 'NON_VALIDE',
     });
-    expect(resultat('c')).toMatchObject({ creditsAcquis: 0, rang: 3 });
+    expect(resultat('c')).toMatchObject({ creditsAcquis: 10, rang: 3 });
     expect(cloture.body.synthese).toMatchObject({ effectif: 3, reussis: 1 });
 
     // Semestre délibéré : plus aucune évaluation ni note.
@@ -725,6 +725,368 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .post(`/deliberations/classes/${ids.classe}/reinscriptions`, tous)
       .expect(201);
     expect(encore.body.creees).toBe(0);
+  });
+
+  // ---------- Crédits, redoublement, documents, calendrier ----------
+
+  it('suit les crédits à rattraper et délivre les documents de fin d’année', async () => {
+    // B passe avec une unité à repasser ; C, ajourné, garde celle qu'il a validée.
+    const dettes = await api('scolarite')
+      .get('/deliberations/dettes')
+      .expect(200);
+    expect(dettes.body.dettes).toHaveLength(1);
+    const dette = dettes.body.dettes[0];
+    expect(dette).toMatchObject({
+      code: 'UE2',
+      credits: 10,
+      statut: 'DETTE',
+      niveau: 'L1',
+      filiere: 'Informatique',
+      personne: { nom: 'Bemba' },
+    });
+    const passage = await api('scolarite').get(
+      `/deliberations/classes/${ids.classe}/passage`,
+    );
+    expect(
+      passage.body.etudiants.map((item: Body) => [
+        item.creditsARattraper,
+        item.creditsConserves,
+      ]),
+    ).toEqual([
+      [0, 0],
+      [10, 0],
+      [0, 10],
+    ]);
+
+    const rattraper = (user: string, note: number) =>
+      api(user).post(`/deliberations/dettes/${dette.id}/rattrapage`, {
+        date: jour,
+        session: 'Session de septembre',
+        notes: [{ code: 'ANG', note }],
+      });
+    await rattraper('prof', 15).expect(403);
+    // Une note moins bonne que l'ancienne ne change rien : la dette reste due.
+    const rate = await rattraper('scolarite', 8).expect(201);
+    expect(rate.body).toMatchObject({ statut: 'DETTE' });
+    expect(rate.body.tentatives).toHaveLength(1);
+    const acquise = await rattraper('scolarite', 13).expect(201);
+    expect(acquise.body).toMatchObject({
+      statut: 'ACQUISE',
+      mode: 'RATTRAPAGE',
+    });
+    expect(Number(acquise.body.moyenne)).toBe(13);
+    await rattraper('scolarite', 14).expect(409);
+    const restantes = await api('scolarite').get('/deliberations/dettes');
+    expect(restantes.body.dettes).toHaveLength(0);
+    const rattrapees = await api('scolarite').get(
+      '/deliberations/dettes?statut=RATTRAPEES',
+    );
+    expect(rattrapees.body.dettes).toHaveLength(1);
+    // Un rattrapage passé s'appuie sur la délibération : elle ne se rouvre plus.
+    const rouverte = await api('scolarite')
+      .post(`/deliberations/classes/${ids.classe}/semestres/0/rouvrir`, {
+        motif: 'Tentative après rattrapage',
+      })
+      .expect(409);
+    expect(rouverte.body.message).toMatch(/rattrapage/);
+
+    // Relevé annuel : les deux semestres, le résultat, et ce qui reste dû.
+    const releve = await api('scolarite')
+      .get(`/deliberations/releves/${ids.a}`)
+      .expect(200);
+    expect(releve.body).toMatchObject({
+      finDeCycle: false,
+      diplomable: false,
+      dettes: [],
+      effectif: 3,
+      resultat: { decision: 'ADMIS', creditsAcquis: 60 },
+    });
+    expect(releve.body.semestres).toHaveLength(2);
+    expect(releve.body.semestres[0].unites[0]).toMatchObject({
+      code: 'UE1',
+      statut: 'ACQUISE',
+    });
+    // Scolarité non soldée : le relevé est retenu comme le bulletin.
+    await api('scolarite').get(`/deliberations/releves/${ids.b}`).expect(403);
+    const tous = await api('scolarite').get(
+      `/deliberations/classes/${ids.classe}/releves`,
+    );
+    expect(tous.body.filter((item: Body) => item.retenu)).toHaveLength(2);
+  });
+
+  it('date les maquettes par année et dispense le redoublant des unités acquises', async () => {
+    const annees = await api('scolarite').get('/academique/annees');
+    ids.annee2 = annees.body.find(
+      (item: Body) => item.libelle === `${annee + 1}-${annee + 2}`,
+    ).id;
+    // La nouvelle année est repartie des maquettes de la précédente.
+    const maquette = (anneeId: string) =>
+      api('scolarite').get(
+        `/academique/maquette?filiereId=${ids.filiere}&niveau=L1&anneeId=${anneeId}`,
+      );
+    const suivante = await maquette(ids.annee2);
+    expect(suivante.body.unites).toHaveLength(3);
+    const ue1 = suivante.body.unites.find((item: Body) => item.code === 'UE1');
+    expect(ue1.matieres).toHaveLength(2);
+    // La modifier ne touche pas celle de l'année d'avant.
+    await api('scolarite')
+      .patch(`/academique/unites/${ue1.id}`, { nom: 'Unité UE1 revue' })
+      .expect(200);
+    const origine = await maquette(ids.annee);
+    expect(
+      origine.body.unites.find((item: Body) => item.code === 'UE1').nom,
+    ).toBe('Unité UE1');
+
+    const classe = await api('scolarite')
+      .post('/academique/classes', {
+        anneeAcademiqueId: ids.annee2,
+        filiereId: ids.filiere,
+        niveau: 'L1',
+      })
+      .expect(201);
+    ids.classe2 = classe.body.id;
+    // C redouble : sa réinscription porte déjà la filière du référentiel.
+    const candidats = await api('scolarite').get(
+      `/academique/classes/${ids.classe2}/candidats`,
+    );
+    expect(candidats.body).toHaveLength(1);
+    expect(candidats.body[0]).toMatchObject({
+      correspond: true,
+      personne: { nom: 'Compaore' },
+    });
+    ids.c2 = candidats.body[0].id;
+    await api('scolarite')
+      .post(`/academique/classes/${ids.classe2}/affectations`, {
+        inscriptionIds: [ids.c2],
+      })
+      .expect(201);
+    const cours = await api('scolarite').get(
+      `/academique/cours?classeId=${ids.classe2}`,
+    );
+    for (const item of cours.body) ids[`${item.matiere.code}2`] = item.id;
+
+    // L'unité d'anglais est acquise depuis l'an dernier : rien à noter pour lui.
+    const anglais = await api('scolarite').get(`/notes/cours/${ids.ANG2}`);
+    expect(anglais.body.etudiants[0].dispense).toBe(true);
+    const maths = await api('scolarite').get(`/notes/cours/${ids.MATH2}`);
+    expect(maths.body.etudiants[0].dispense).toBe(false);
+    const examen = async (code: string, valeur?: number) => {
+      const created = await api('scolarite')
+        .post('/notes/evaluations', {
+          coursId: ids[`${code}2`],
+          type: 'EXAMEN',
+          libelle: `Examen ${code}`,
+        })
+        .expect(201);
+      if (valeur !== undefined)
+        await api('scolarite')
+          .put(`/notes/evaluations/${created.body.id}/notes`, {
+            notes: [{ inscriptionId: ids.c2, valeur }],
+          })
+          .expect(200);
+      await api('scolarite')
+        .post(`/notes/evaluations/${created.body.id}/valider`)
+        .expect(201);
+    };
+    await examen('MATH', 14);
+    await examen('ALGO', 10);
+    // Validée sans note : le seul étudiant de la classe en est dispensé.
+    await examen('ANG');
+    const semestre = await api('scolarite')
+      .get(`/deliberations/classes/${ids.classe2}/semestres/1`)
+      .expect(200);
+    expect(semestre.body.problemes).toEqual([]);
+    const ligne = semestre.body.resultats[0];
+    expect(
+      ligne.detail.unites.find((item: Body) => item.code === 'UE2'),
+    ).toMatchObject({ validee: true, acquise: libelleAnnee, moyenne: 12 });
+    expect(ligne).toMatchObject({
+      decision: 'VALIDE',
+      creditsAcquis: 30,
+      moyenne: 12.67,
+    });
+  });
+
+  it('tient le calendrier des épreuves et refuse les conflits', async () => {
+    const salles = await api('scolarite').get('/academique/salles');
+    const date = `${annee + 1}-11-10`;
+    const epreuve = (libelle: string, heureDebut?: string, heureFin?: string) =>
+      api('scolarite').post('/notes/evaluations', {
+        coursId: ids.PROJ2,
+        type: 'CONTROLE',
+        libelle,
+        date,
+        heureDebut,
+        heureFin,
+        salleId: salles.body[0].id,
+        surveillant: 'M. Mabiala',
+      });
+    await epreuve('Devoir 1', '08:00', '10:00').expect(201);
+    // Une heure sans l'autre ne veut rien dire.
+    await epreuve('Devoir bancal', '08:00').expect(400);
+    const conflit = await epreuve('Devoir 2', '09:00', '11:00').expect(409);
+    expect(conflit.body.message).toMatch(/La classe a déjà « Devoir 1 »/);
+    const second = await epreuve('Devoir 2', '10:00', '12:00').expect(201);
+    // Déplacer une épreuve repasse par le même contrôle.
+    await api('scolarite')
+      .patch(`/notes/evaluations/${second.body.id}`, { heureDebut: '09:30' })
+      .expect(409);
+    const calendrier = await api('scolarite')
+      .get(`/notes/calendrier?anneeId=${ids.annee2}`)
+      .expect(200);
+    expect(calendrier.body.sansDate).toBe(3);
+    expect(
+      calendrier.body.epreuves.map((item: Body) => [
+        item.libelle,
+        item.heureDebut,
+        item.salle,
+        item.conflits.length,
+      ]),
+    ).toEqual([
+      ['Devoir 1', '08:00', 'Salle A', 0],
+      ['Devoir 2', '10:00', 'Salle A', 0],
+    ]);
+    await api('rh').get('/notes/calendrier').expect(403);
+  });
+
+  it('ouvre de nouveaux niveaux, copie et importe des maquettes, rapproche les filières', async () => {
+    const niveaux = await api('scolarite').get('/academique/niveaux');
+    expect(niveaux.body.map((item: Body) => item.code)).toEqual(['L1', 'L2']);
+    const troisieme = {
+      code: 'l3',
+      libelle: 'Troisième année',
+      cycle: 'Licence',
+      rang: 3,
+      diplome: 'Licence',
+    };
+    await api('prof').post('/academique/niveaux', troisieme).expect(403);
+    const l3 = await api('scolarite')
+      .post('/academique/niveaux', troisieme)
+      .expect(201);
+    expect(l3.body.code).toBe('L3');
+    // Deux niveaux ne partagent pas le même rang d'un cycle.
+    await api('scolarite')
+      .post('/academique/niveaux', { ...troisieme, code: 'LX' })
+      .expect(409);
+
+    // Le nouveau niveau s'inscrit ; un niveau inconnu est refusé.
+    const inscrire = (niveau: string, filiere: string) =>
+      api('scolarite').post('/inscriptions', {
+        nouvellePersonne: { nom: `Etudiant ${niveau}`, prenom: 'Test' },
+        anneeScolaire: `${annee + 1}-${annee + 2}`,
+        niveau,
+        filiere,
+      });
+    await inscrire('M9', 'Informatique').expect(400);
+    const liee = await inscrire('L3', ' informatique ').expect(201);
+    expect(liee.body).toMatchObject({
+      niveau: 'L3',
+      filiere: 'Informatique',
+      filiereId: ids.filiere,
+    });
+    // Une faute de frappe reste un texte libre, proposé au rapprochement.
+    const fautive = await inscrire('L3', 'Informatiqe').expect(201);
+    expect(fautive.body.filiereId).toBeNull();
+    const aRapprocher = await api('scolarite').get(
+      '/academique/filieres/rapprochement',
+    );
+    expect(aRapprocher.body).toEqual([
+      {
+        texte: 'Informatiqe',
+        inscriptions: 1,
+        suggestion: { id: ids.filiere, nom: 'Informatique' },
+      },
+    ]);
+    const rapprochement = await api('scolarite')
+      .post('/academique/filieres/rapprochement', {
+        texte: 'Informatiqe',
+        filiereId: ids.filiere,
+      })
+      .expect(201);
+    expect(rapprochement.body.rapprochees).toBe(1);
+    const reste = await api('scolarite').get(
+      '/academique/filieres/rapprochement',
+    );
+    expect(reste.body).toEqual([]);
+
+    // Une filière courte s'arrête avant la fin du cycle.
+    const courte = await api('scolarite')
+      .patch(`/academique/filieres/${ids.filiere}`, { niveauFinal: 'L2' })
+      .expect(200);
+    expect(courte.body.niveauFinal).toBe('L2');
+    await api('scolarite')
+      .patch(`/academique/filieres/${ids.filiere}`, { niveauFinal: 'Z9' })
+      .expect(400);
+
+    // Tronc commun : une unité copiée vers une autre filière, sur deux niveaux.
+    const reseaux = await api('scolarite')
+      .post('/academique/filieres', { code: 'RES', nom: 'Réseaux' })
+      .expect(201);
+    const copier = () =>
+      api('scolarite')
+        .post('/academique/maquette/copier', {
+          source: {
+            anneeId: ids.annee2,
+            filiereId: ids.filiere,
+            niveau: 'L1',
+          },
+          cibles: [
+            { filiereId: reseaux.body.id, niveau: 'L1' },
+            { filiereId: reseaux.body.id, niveau: 'L3' },
+          ],
+          unites: ['UE1'],
+        })
+        .expect(201);
+    expect((await copier()).body).toMatchObject({
+      maquettes: 2,
+      unites: 2,
+      matieres: 4,
+    });
+    // Recopier n'écrase ni ne double rien.
+    expect((await copier()).body).toMatchObject({
+      unites: 0,
+      matieres: 0,
+      dejaPresentes: 2,
+    });
+
+    const importer = (lignes: Body[]) =>
+      api('scolarite').post('/academique/maquette/importer', {
+        anneeAcademiqueId: ids.annee2,
+        filiereId: reseaux.body.id,
+        niveau: 'L2',
+        lignes,
+      });
+    const unite = {
+      semestre: 1,
+      codeUnite: 'UEA',
+      nomUnite: 'Bases des réseaux',
+      credits: 30,
+    };
+    const refuse = await importer([
+      { ...unite, codeMatiere: 'M1', nomMatiere: 'Matière 1' },
+      { ...unite, codeUnite: 'UEB', semestre: 3 },
+    ]).expect(400);
+    expect(refuse.body.message).toMatch(/^Ligne 2/);
+    const importe = await importer([
+      {
+        ...unite,
+        codeMatiere: 'M1',
+        nomMatiere: 'Matière 1',
+        coefficient: '2,5',
+        volumeHoraire: 40,
+      },
+      { codeUnite: 'UEA', codeMatiere: 'M2', nomMatiere: 'Matière 2' },
+    ]).expect(201);
+    expect(importe.body).toMatchObject({ unites: 1, matieres: 2 });
+    const maquettes = await api('scolarite').get(
+      `/academique/maquettes?anneeId=${ids.annee2}`,
+    );
+    expect(maquettes.body.maquettes).toEqual(
+      expect.arrayContaining([
+        { filiereId: reseaux.body.id, niveau: 'L2', unites: 1, credits: 30 },
+        { filiereId: reseaux.body.id, niveau: 'L3', unites: 1, credits: 20 },
+      ]),
+    );
   });
 
   // ---------- Paie ----------
@@ -982,6 +1344,14 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       heuresFaites: 2,
     });
     expect(stats.body.evolution).toHaveLength(2);
+    expect(stats.body.effectifs.parPole).toEqual([
+      { libelle: 'Sans pôle', total: 3 },
+    ]);
+    expect(stats.body.reussiteParPole).toEqual([
+      { pole: 'Sans pôle', effectif: 3, reussis: 2, taux: 66.7 },
+    ]);
+    // La dette de l'année a été rattrapée.
+    expect(stats.body.dettes).toEqual({ etudiants: 0, unites: 0, credits: 0 });
     await api('rh').get('/deliberations/statistiques').expect(403);
   });
 
@@ -1185,5 +1555,239 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       `/synchronisation/changements?depuis=${encodeURIComponent(depuis)}`,
     );
     expect(rh.body.inscriptions).toEqual([]);
+  });
+
+  it('annule un paiement saisi par erreur sans rien effacer', async () => {
+    const finance = async () =>
+      (await api('admin').get(`/inscriptions/${ids.b}/finance`)).body
+        .obligations[0] as Body;
+    const avant = await finance();
+    const paiement = await api('admin')
+      .post('/paiements', {
+        inscriptionId: ids.b,
+        elementDossierId: avant.id,
+        montant: 2000,
+        typePaiement: 'FRAIS_INSCRIPTION',
+      })
+      .expect(201);
+    const annulation = `/paiements/${paiement.body.id}/annulation`;
+
+    // Encaisser ne donne pas le droit d'annuler, et un motif est exigé.
+    await api('scolarite')
+      .post(annulation, { motif: 'Mauvais étudiant' })
+      .expect(403);
+    await api('admin').post(annulation, { motif: 'non' }).expect(400);
+
+    const annule = await api('admin')
+      .post(annulation, { motif: 'Saisi sur le mauvais étudiant' })
+      .expect(201);
+    expect(annule.body).toMatchObject({
+      typePaiement: 'ANNULATION',
+      annulePaiementId: paiement.body.id,
+      motif: 'Saisi sur le mauvais étudiant',
+    });
+    expect(Number(annule.body.montant)).toBe(-2000);
+    // Une seule annulation par paiement, et une annulation ne s'annule pas.
+    await api('admin')
+      .post(annulation, { motif: 'Seconde tentative' })
+      .expect(409);
+    await api('admin')
+      .post(`/paiements/${annule.body.id}/annulation`, {
+        motif: 'Annuler une annulation',
+      })
+      .expect(400);
+
+    // Le reste à payer revient à sa valeur, le journal garde les deux lignes.
+    expect((await finance()).resteAPayer).toBe(avant.resteAPayer);
+    const journal = (await api('admin').get('/paiements')).body as Body[];
+    expect(journal.find((item) => item.id === paiement.body.id)).toMatchObject({
+      annule: true,
+    });
+
+    // La comptabilité contre-passe l'encaissement sur le même produit.
+    const reference = (annule.body.id as string).slice(0, 8).toUpperCase();
+    const ecriture = (
+      await api('comptable').get('/comptabilite/journal?limit=100')
+    ).body.data.find((item: Body) => item.reference === reference) as Body;
+    expect(
+      ecriture.lignes.map((ligne: Body) => [
+        ligne.compte.numero,
+        Number(ligne.debit),
+        Number(ligne.credit),
+      ]),
+    ).toEqual([
+      ['7062', 2000, 0],
+      ['571', 0, 2000],
+    ]);
+  });
+
+  it('encaisse avec un mode de paiement, un caissier et un numéro de reçu suivi', async () => {
+    const obligation = (
+      await api('admin').get(`/inscriptions/${ids.b}/finance`)
+    ).body.obligations[0] as Body;
+    const verser = (modePaiement?: string) =>
+      api('scolarite').post('/paiements', {
+        inscriptionId: ids.b,
+        elementDossierId: obligation.id,
+        montant: 500,
+        typePaiement: 'FRAIS_INSCRIPTION',
+        modePaiement,
+      });
+    await verser('TROC').expect(400);
+    const mobile = await verser('MOBILE_MONEY').expect(201);
+    const especes = await verser().expect(201);
+
+    const journal = (await api('admin').get('/paiements')).body as Body[];
+    const ligne = (id: string) => journal.find((item) => item.id === id)!;
+    expect(ligne(mobile.body.id)).toMatchObject({
+      modePaiement: 'MOBILE_MONEY',
+      saisiParNom: 'scolarite',
+    });
+    expect(ligne(especes.body.id).modePaiement).toBe('ESPECES');
+    // Deux reçus consécutifs portent deux numéros qui se suivent.
+    const rang = (id: string) =>
+      Number((ligne(id).numeroRecu as string).split('-').pop());
+    expect(ligne(mobile.body.id).numeroRecu).toMatch(/^RC-\d{4}-\d{6}$/);
+    expect(rang(especes.body.id)).toBe(rang(mobile.body.id) + 1);
+
+    // Le mobile money n'entre pas dans la caisse.
+    const reference = (mobile.body.id as string).slice(0, 8).toUpperCase();
+    const ecriture = (
+      await api('comptable').get('/comptabilite/journal?limit=100')
+    ).body.data.find((item: Body) => item.reference === reference) as Body;
+    expect(ecriture.journal).toBe('MM');
+    expect(ecriture.lignes[0].compte.numero).toBe('552');
+
+    // Deux versements simultanés ne dépassent jamais le reste à payer.
+    const reste = Number(
+      (await api('admin').get(`/inscriptions/${ids.b}/finance`)).body
+        .obligations[0].resteAPayer,
+    );
+    const simultanes = await Promise.all(
+      [1, 2].map(() =>
+        api('admin').post('/paiements', {
+          inscriptionId: ids.b,
+          elementDossierId: obligation.id,
+          montant: reste,
+          typePaiement: 'FRAIS_INSCRIPTION',
+        }),
+      ),
+    );
+    expect(simultanes.map((reponse) => reponse.status).sort()).toEqual([
+      201, 400,
+    ]);
+  });
+
+  it('ferme un exercice sans y laisser entrer d’écriture après coup', async () => {
+    const demande = await api('admin')
+      .post('/demandes-bourse', {
+        nouvellePersonne: { nom: 'Cloture', prenom: 'Etu' },
+        niveauDemande: 'PREMIERE_ANNEE',
+        filiereSouhaitee: 'Informatique',
+      })
+      .expect(201);
+    const verser = async (montant: number) =>
+      (
+        (
+          await api('admin')
+            .post('/paiements', {
+              demandeBourseId: demande.body.id,
+              montant,
+              typePaiement: 'FRAIS_DEPOT',
+            })
+            .expect(201)
+        ).body.id as string
+      )
+        .slice(0, 8)
+        .toUpperCase();
+    const ecritureDe = async (reference: string) =>
+      (
+        await api('comptable').get('/comptabilite/journal?limit=100')
+      ).body.data.find((item: Body) => item.reference === reference) as Body;
+    const exercice = (
+      (await api('gestionnaire').get('/finances/exercices')).body as Body[]
+    ).find(
+      (item) =>
+        new Date(item.dateDebut) <= new Date() &&
+        new Date(item.dateFin) >= new Date(),
+    )!;
+
+    // Encaissé avant la clôture, pas encore passé en comptabilité : la clôture l'y fait entrer.
+    const avant = await verser(700);
+    await api('gestionnaire')
+      .patch(`/finances/exercices/${exercice.id}`, { cloture: true })
+      .expect(200);
+    const dansExercice = await ecritureDe(avant);
+    expect(dansExercice.libelle).not.toContain('exercice clôturé');
+    expect(dansExercice.exerciceId).toBe(exercice.id);
+
+    // Encaissé après : l'écriture existe, mais plus dans l'exercice fermé.
+    const apres = await ecritureDe(await verser(800));
+    expect(apres.libelle).toContain('exercice clôturé');
+    expect(apres.exerciceId).toBeNull();
+
+    await api('gestionnaire')
+      .patch(`/finances/exercices/${exercice.id}`, { cloture: false })
+      .expect(200);
+  });
+
+  it('organise les filières en pôles, sans rien figer', async () => {
+    const pole = await api('scolarite')
+      .post('/academique/poles', { nom: 'Pôle Santé', description: 'Essai' })
+      .expect(201);
+    await api('scolarite')
+      .post('/academique/poles', { nom: 'pôle santé' })
+      .expect(409);
+    const filiere = await api('scolarite')
+      .post('/academique/filieres', {
+        code: 'SI',
+        nom: 'Soins infirmiers',
+        poleId: pole.body.id,
+      })
+      .expect(201);
+    expect(filiere.body.pole.nom).toBe('Pôle Santé');
+    await api('scolarite')
+      .post('/academique/filieres', {
+        code: 'XX',
+        nom: 'Sans pôle',
+        poleId: 'inconnu',
+      })
+      .expect(404);
+    // Sans droit sur la structure, on ne touche à rien.
+    await api('rh').post('/academique/poles', { nom: 'Interdit' }).expect(403);
+
+    // L'organisation de départ se charge une fois, puis ne recrée rien.
+    const premier = await api('scolarite')
+      .post('/academique/poles/structure-type', {})
+      .expect(201);
+    expect(premier.body.poles).toBe(4);
+    const second = await api('scolarite')
+      .post('/academique/poles/structure-type', {})
+      .expect(201);
+    expect(second.body).toEqual({ poles: 0, filieres: 0, rattachees: 0 });
+    const poles = (await api('scolarite').get('/academique/poles'))
+      .body as Body[];
+    const industriel = poles.find((item) => item.nom === 'Pôle Industriel')!;
+    expect(industriel.filieres).toHaveLength(7);
+    expect(
+      poles.reduce((total, item) => total + item.filieres.length, 0),
+    ).toBeGreaterThanOrEqual(33);
+
+    // Tout reste modifiable : renommer un pôle, déplacer ou détacher une filière.
+    await api('scolarite')
+      .patch(`/academique/poles/${pole.body.id}`, {
+        nom: 'Pôle Santé et Social',
+      })
+      .expect(200);
+    const deplacee = await api('scolarite')
+      .patch(`/academique/filieres/${filiere.body.id}`, {
+        poleId: industriel.id,
+      })
+      .expect(200);
+    expect(deplacee.body.pole.nom).toBe('Pôle Industriel');
+    const detachee = await api('scolarite')
+      .patch(`/academique/filieres/${filiere.body.id}`, { poleId: null })
+      .expect(200);
+    expect(detachee.body.pole).toBeNull();
   });
 });

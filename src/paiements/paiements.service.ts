@@ -7,7 +7,13 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { parseDateOrder } from '../common/date-order';
 import type { SaisieLocale } from '../common/saisie-locale';
+import { AnnulerPaiementDto } from './dto/annuler-paiement.dto';
 import { CreatePaiementDto } from './dto/create-paiement.dto';
+import {
+  numeroRecu,
+  parseModePaiement,
+  verrouillerDossier,
+} from './encaissement';
 import {
   RembourserTropPercuDto,
   ReporterTropPercuDto,
@@ -26,7 +32,11 @@ type Transaction = Parameters<Parameters<PrismaService['$transaction']>[0]>[0];
 export class PaiementsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(createDto: CreatePaiementDto, saisie: SaisieLocale = {}) {
+  async create(
+    createDto: CreatePaiementDto,
+    saisie: SaisieLocale = {},
+    auteur: string | null = null,
+  ) {
     // Paiement saisi hors ligne et déjà reçu : on le renvoie tel quel, sans
     // jamais l'encaisser une seconde fois.
     if (saisie.id) {
@@ -42,6 +52,7 @@ export class PaiementsService {
     const elementDossierId = this.optionalString(createDto.elementDossierId);
     const typePaiement = this.parseTypePaiement(createDto.typePaiement);
     const montant = this.montant(createDto.montant);
+    const modePaiement = parseModePaiement(createDto.modePaiement);
 
     const elementDossier = elementDossierId
       ? await this.prisma.elementDossier.findUnique({
@@ -106,19 +117,18 @@ export class PaiementsService {
         'Un paiement concerne une echeance ou une obligation du dossier, pas les deux',
       );
     }
-    if (elementDossier) {
-      await this.ensureWithinRemaining(elementDossier, Number(montant));
-    }
     if (echeanceId && !dossier.typeBourseId) {
       throw new BadRequestException(
         'Une echeance ne peut etre utilisee que pour un dossier avec bourse',
       );
     }
+    const echeance = echeanceId
+      ? await this.prisma.echeanceBourse.findUnique({
+          where: { id: echeanceId },
+          select: { id: true, typeBourseId: true, montantAttendu: true },
+        })
+      : null;
     if (echeanceId) {
-      const echeance = await this.prisma.echeanceBourse.findUnique({
-        where: { id: echeanceId },
-        select: { typeBourseId: true },
-      });
       if (!echeance) {
         throw new NotFoundException('Echeance de bourse introuvable');
       }
@@ -129,18 +139,42 @@ export class PaiementsService {
       }
     }
 
-    return this.prisma.paiement.create({
-      data: {
-        demandeBourseId: resolvedDemandeBourseId,
-        inscriptionId: resolvedInscriptionId,
-        echeanceId,
-        elementDossierId,
-        montant,
-        typePaiement,
-        ...(saisie.id ? { id: saisie.id } : {}),
-        ...(saisie.date ? { datePaiement: saisie.date } : {}),
-      },
-      include: { echeance: true, elementDossier: true },
+    // Contrôle du reste à payer, numéro de reçu et enregistrement : un seul bloc.
+    return this.prisma.$transaction(async (transaction) => {
+      await verrouillerDossier(
+        transaction,
+        dossier.id,
+        echeance ? dossier.demandeBourseId : null,
+      );
+      if (elementDossier)
+        await this.ensureWithinRemaining(
+          elementDossier,
+          Number(montant),
+          transaction,
+        );
+      if (echeance)
+        await this.ensureEcheanceWithinRemaining(
+          transaction,
+          echeance,
+          dossier,
+          Number(montant),
+        );
+      return transaction.paiement.create({
+        data: {
+          demandeBourseId: resolvedDemandeBourseId,
+          inscriptionId: resolvedInscriptionId,
+          echeanceId,
+          elementDossierId,
+          montant,
+          typePaiement,
+          modePaiement,
+          saisiParNom: auteur,
+          numeroRecu: await numeroRecu(transaction),
+          ...(saisie.id ? { id: saisie.id } : {}),
+          ...(saisie.date ? { datePaiement: saisie.date } : {}),
+        },
+        include: { echeance: true, elementDossier: true },
+      });
     });
   }
 
@@ -170,6 +204,7 @@ export class PaiementsService {
         inscription: { include: { personne: true } },
         elementDossier: { include: { elementRequis: true } },
         echeance: true,
+        annulation: { select: { id: true } },
       },
       orderBy: [{ datePaiement: ordreDate }, { id: ordreDate }],
     });
@@ -183,9 +218,13 @@ export class PaiementsService {
     typePaiement: string;
     motif: string | null;
     saisiParNom: string | null;
+    modePaiement: string | null;
+    numeroRecu: string | null;
     demandeBourseId: string | null;
     inscriptionId: string | null;
     echeanceId: string | null;
+    annulePaiementId: string | null;
+    annulation?: { id: string } | null;
     demandeBourse: { filiereSouhaitee: string; personne: unknown } | null;
     inscription: { filiere: string; personne: unknown } | null;
     elementDossier: { elementRequis: { nom: string } } | null;
@@ -198,6 +237,8 @@ export class PaiementsService {
       typePaiement: payment.typePaiement,
       motif: payment.motif,
       saisiParNom: payment.saisiParNom,
+      modePaiement: payment.modePaiement ?? 'ESPECES',
+      numeroRecu: payment.numeroRecu,
       dossierId: payment.demandeBourseId ?? payment.inscriptionId,
       dossierType: payment.demandeBourseId ? 'demande-bourse' : 'inscription',
       dossier: payment.demandeBourse
@@ -208,7 +249,80 @@ export class PaiementsService {
       obligation: payment.elementDossier?.elementRequis.nom ?? null,
       echeance: payment.echeance?.libelle ?? null,
       affecte: payment.elementDossier !== null || payment.echeanceId !== null,
+      annule: Boolean(payment.annulation),
+      annulePaiementId: payment.annulePaiementId,
     };
+  }
+
+  // ---------- Annulation ----------
+  // Un encaissement saisi par erreur ne s'efface pas : une ligne négative,
+  // signée et motivée, le neutralise sur la même obligation ou la même échéance.
+
+  async annuler(id: string, dto: Partial<AnnulerPaiementDto>, auteur: string) {
+    const motif = dto.motif?.trim() ?? '';
+    if (motif.length < 5 || motif.length > 300)
+      throw new BadRequestException(
+        "Le motif de l'annulation doit contenir entre 5 et 300 caractères",
+      );
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        const paiement = await transaction.paiement.findUnique({
+          where: { id },
+          include: { annulation: { select: { id: true } } },
+        });
+        if (!paiement) throw new NotFoundException('Paiement introuvable');
+        await verrouillerDossier(
+          transaction,
+          paiement.demandeBourseId ?? paiement.inscriptionId,
+        );
+        if (
+          !TYPES_PAIEMENT.includes(paiement.typePaiement as TypePaiementValue)
+        )
+          throw new BadRequestException(
+            "Seul un encaissement s'annule : un report, un remboursement ou une annulation ne s'annule pas",
+          );
+        if (paiement.annulation)
+          throw new ConflictException('Ce paiement est déjà annulé');
+        const montant = Number(paiement.montant);
+        if (paiement.elementDossierId) {
+          const encaisse = await transaction.paiement.aggregate({
+            where: { elementDossierId: paiement.elementDossierId },
+            _sum: { montant: true },
+          });
+          if (this.roundMoney(Number(encaisse._sum.montant ?? 0) - montant) < 0)
+            throw new BadRequestException(
+              'Une partie de ce paiement a déjà été reportée ou remboursée : il ne peut plus être annulé',
+            );
+        }
+        const annulation = await transaction.paiement.create({
+          data: {
+            demandeBourseId: paiement.demandeBourseId,
+            inscriptionId: paiement.inscriptionId,
+            echeanceId: paiement.echeanceId,
+            elementDossierId: paiement.elementDossierId,
+            montant: (-montant).toFixed(2),
+            typePaiement: 'ANNULATION',
+            // L'argent ressort par où il était entré.
+            modePaiement: paiement.modePaiement,
+            motif,
+            saisiParNom: auteur,
+            annulePaiementId: paiement.id,
+          },
+          include: {
+            demandeBourse: { include: { personne: true } },
+            inscription: { include: { personne: true } },
+            elementDossier: { include: { elementRequis: true } },
+            echeance: true,
+          },
+        });
+        return this.transaction(annulation);
+      });
+    } catch (failure) {
+      // Deux annulations simultanées : la base n'en accepte qu'une par paiement.
+      if ((failure as { code?: string }).code === 'P2002')
+        throw new ConflictException('Ce paiement est déjà annulé');
+      throw failure;
+    }
   }
 
   // ---------- Trop-perçu ----------
@@ -263,6 +377,7 @@ export class PaiementsService {
 
   async reporterTropPercu(dto: Partial<ReporterTropPercuDto>, auteur: string) {
     return this.prisma.$transaction(async (transaction) => {
+      await this.verrouillerObligation(transaction, dto.elementDossierId);
       const source = await this.obligationAvecTropPercu(
         transaction,
         dto.elementDossierId,
@@ -328,7 +443,9 @@ export class PaiementsService {
       throw new BadRequestException(
         'Le motif du remboursement doit contenir entre 5 et 300 caractères',
       );
+    const modePaiement = parseModePaiement(dto.modePaiement);
     return this.prisma.$transaction(async (transaction) => {
+      await this.verrouillerObligation(transaction, dto.elementDossierId);
       const source = await this.obligationAvecTropPercu(
         transaction,
         dto.elementDossierId,
@@ -345,6 +462,8 @@ export class PaiementsService {
           elementDossierId: source.obligation.id,
           montant: (-montant).toFixed(2),
           typePaiement: 'REMBOURSEMENT',
+          modePaiement,
+          numeroRecu: await numeroRecu(transaction),
           motif,
           saisiParNom: auteur,
         },
@@ -366,6 +485,7 @@ export class PaiementsService {
         echeanceId: null,
         // Les régularisations (report, remboursement) ne sont pas à affecter.
         typePaiement: { in: [...TYPES_PAIEMENT] },
+        annulation: { is: null },
       },
       include: {
         demandeBourse: { include: { personne: true } },
@@ -395,9 +515,14 @@ export class PaiementsService {
         echeanceId: true,
         demandeBourseId: true,
         inscriptionId: true,
+        annulation: { select: { id: true } },
       },
     });
     if (!payment) throw new NotFoundException('Paiement introuvable');
+    if (payment.annulation)
+      throw new ConflictException(
+        'Ce paiement est annulé et ne peut plus être affecté',
+      );
     if (payment.elementDossierId) {
       throw new ConflictException('Ce paiement est deja affecte');
     }
@@ -426,11 +551,20 @@ export class PaiementsService {
         'Cette obligation ne correspond pas au dossier du paiement',
       );
     }
-    await this.ensureWithinRemaining(obligation, Number(payment.montant));
-
-    const result = await this.prisma.paiement.updateMany({
-      where: { id: paymentId, elementDossierId: null },
-      data: { elementDossierId },
+    const result = await this.prisma.$transaction(async (transaction) => {
+      await verrouillerDossier(
+        transaction,
+        payment.demandeBourseId ?? payment.inscriptionId,
+      );
+      await this.ensureWithinRemaining(
+        obligation,
+        Number(payment.montant),
+        transaction,
+      );
+      return transaction.paiement.updateMany({
+        where: { id: paymentId, elementDossierId: null },
+        data: { elementDossierId },
+      });
     });
     if (result.count !== 1)
       throw new ConflictException('Ce paiement a deja ete affecte');
@@ -512,16 +646,70 @@ export class PaiementsService {
     };
   }
 
+  private async verrouillerObligation(
+    transaction: Transaction,
+    elementDossierId: string | undefined,
+  ) {
+    if (!elementDossierId) return;
+    const obligation = await transaction.elementDossier.findUnique({
+      where: { id: elementDossierId },
+      select: { demandeBourseId: true, inscriptionId: true },
+    });
+    await verrouillerDossier(
+      transaction,
+      obligation?.demandeBourseId ?? obligation?.inscriptionId,
+    );
+  }
+
+  // Une échéance de bourse ne reçoit pas plus que son montant, que le
+  // versement soit fait sur la demande ou sur l'inscription qui en découle.
+  private async ensureEcheanceWithinRemaining(
+    transaction: Transaction,
+    echeance: { id: string; montantAttendu: unknown },
+    dossier: { id: string; demandeBourseId: string | null },
+    montant: number,
+  ): Promise<void> {
+    if (
+      echeance.montantAttendu === null ||
+      echeance.montantAttendu === undefined
+    )
+      return;
+    const paye = await transaction.paiement.aggregate({
+      where: {
+        echeanceId: echeance.id,
+        ...(dossier.demandeBourseId
+          ? {
+              OR: [
+                { demandeBourseId: dossier.demandeBourseId },
+                { inscription: { demandeBourseId: dossier.demandeBourseId } },
+              ],
+            }
+          : { inscriptionId: dossier.id }),
+      },
+      _sum: { montant: true },
+    });
+    const reste = this.roundMoney(
+      Number(echeance.montantAttendu) - Number(paye._sum.montant ?? 0),
+    );
+    if (montant > reste)
+      throw new BadRequestException(
+        reste > 0
+          ? `Le paiement depasse le montant restant de cette echeance (${reste} F)`
+          : 'Cette echeance est deja soldee',
+      );
+  }
+
   private async ensureWithinRemaining(
     obligation: { id: string; montantAttendu: unknown },
     montant: number,
+    client: Transaction | PrismaService = this.prisma,
   ): Promise<void> {
     if (!obligation.montantAttendu) {
       throw new BadRequestException(
         'Cette obligation ne possède pas de montant attendu',
       );
     }
-    const allocated = await this.prisma.paiement.aggregate({
+    const allocated = await client.paiement.aggregate({
       where: { elementDossierId: obligation.id },
       _sum: { montant: true },
     });
@@ -543,7 +731,7 @@ export class PaiementsService {
     if (!demande) {
       throw new NotFoundException('Demande de bourse introuvable');
     }
-    return demande;
+    return { ...demande, demandeBourseId: demande.id as string | null };
   }
 
   private async getInscriptionDossier(id: string) {
@@ -551,6 +739,7 @@ export class PaiementsService {
       where: { id },
       select: {
         id: true,
+        demandeBourseId: true,
         demandeBourse: { select: { typeBourseId: true } },
       },
     });
@@ -559,6 +748,7 @@ export class PaiementsService {
     }
     return {
       id: inscription.id,
+      demandeBourseId: inscription.demandeBourseId,
       typeBourseId: inscription.demandeBourse?.typeBourseId ?? null,
     };
   }

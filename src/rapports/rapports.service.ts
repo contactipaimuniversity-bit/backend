@@ -699,7 +699,14 @@ export class RapportsService {
       addCreation({
         id: item.id,
         date: item.date,
-        action: 'Paiement enregistré',
+        action:
+          item.type === 'REMBOURSEMENT'
+            ? 'Remboursement'
+            : item.type === 'ANNULATION'
+              ? 'Paiement annulé'
+              : item.type === 'REPORT'
+                ? 'Report de trop-perçu'
+                : 'Paiement enregistré',
         detail:
           `${item.personne?.prenom ?? ''} ${item.personne?.nom ?? ''} · ${item.dossier} · ${item.type}`.trim(),
         categorie: 'paiement',

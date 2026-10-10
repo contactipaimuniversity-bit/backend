@@ -8,4 +8,5 @@ export class RembourserTropPercuDto {
   elementDossierId!: string;
   montant!: string | number;
   motif!: string;
+  modePaiement?: string;
 }

@@ -17,12 +17,14 @@ import {
   texteRequis,
 } from '../common/saisie';
 import { PrismaService } from '../prisma/prisma.service';
+import { STRUCTURE_TYPE } from './structure-type';
 import {
   chevauche,
-  NIVEAUX,
+  filiereProche,
   normaliser,
   ReglesNotes,
 } from './academique.rules';
+import { niveauSuivant, niveauxConnus } from './niveaux';
 
 const PARAMETRES_ID = 'academique';
 const STATUTS_ANNEE = ['PREPARATION', 'EN_COURS', 'CLOTUREE'] as const;
@@ -30,6 +32,27 @@ const JOURS = ['', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
 
 type Body = Record<string, unknown>;
 type Transaction = Parameters<Parameters<PrismaService['$transaction']>[0]>[0];
+
+type MatiereMaquette = {
+  code: string;
+  nom: string;
+  coefficient: number;
+  volumeHoraire: number;
+  actif?: boolean;
+};
+type UniteMaquette = {
+  semestre: number;
+  code: string;
+  nom: string;
+  credits: number;
+  ordre?: number;
+  matieres: MatiereMaquette[];
+};
+type CibleMaquette = {
+  anneeId: string | null;
+  filiereId: string;
+  niveau: string;
+};
 
 @Injectable()
 export class StructureService {
@@ -144,12 +167,56 @@ export class StructureService {
       throw new BadRequestException(
         'La date de fin doit suivre la date de rentrée',
       );
-    return this.unique(
+    const annee = await this.unique(
       () =>
         this.prisma.anneeAcademique.create({
           data: { libelle, dateDebut, dateFin },
         }),
       'Cette année académique existe déjà',
+    );
+    // Les maquettes posées avant toute année la rejoignent ; sinon l'année
+    // repart des maquettes de l'année la plus proche, modifiables sans effet
+    // sur celle-ci.
+    const adoptees = await this.prisma.uniteEnseignement.updateMany({
+      where: { anneeAcademiqueId: null },
+      data: { anneeAcademiqueId: annee.id },
+    });
+    let reconduites = 0;
+    if (!adoptees.count) {
+      const avecMaquettes = { id: { not: annee.id }, unites: { some: {} } };
+      const source =
+        (await this.prisma.anneeAcademique.findFirst({
+          where: { ...avecMaquettes, dateDebut: { lt: dateDebut } },
+          orderBy: { dateDebut: 'desc' },
+        })) ??
+        (await this.prisma.anneeAcademique.findFirst({
+          where: avecMaquettes,
+          orderBy: { dateDebut: 'asc' },
+        }));
+      if (source)
+        reconduites = (await this.reconduire(source.id, annee.id)).unites;
+    }
+    return { ...annee, maquettesReprises: adoptees.count + reconduites };
+  }
+
+  // Année de travail par défaut : celle qui couvre la date du jour, sinon la plus récente.
+  async anneeCourante() {
+    return (
+      (await this.prisma.anneeAcademique.findFirst({
+        where: {
+          statut: { not: 'CLOTUREE' },
+          dateDebut: { lte: new Date() },
+          dateFin: { gte: new Date() },
+        },
+        orderBy: { dateDebut: 'desc' },
+      })) ??
+      (await this.prisma.anneeAcademique.findFirst({
+        where: { statut: 'EN_COURS' },
+        orderBy: { dateDebut: 'desc' },
+      })) ??
+      (await this.prisma.anneeAcademique.findFirst({
+        orderBy: { dateDebut: 'desc' },
+      }))
     );
   }
 
@@ -187,31 +254,328 @@ export class StructureService {
     return this.prisma.anneeAcademique.update({ where: { id }, data });
   }
 
+  // ---------- Niveaux ----------
+  // L1, L2, L3, M1… : on en ajoute autant que les cursus en demandent. Le
+  // passage va d'un rang au suivant dans le même cycle.
+
+  niveaux() {
+    return niveauxConnus(this.prisma);
+  }
+
+  async exigerNiveau(value: unknown): Promise<string> {
+    const code = texteRequis(value, 'Le niveau', 1, 12);
+    const niveau = (await this.niveaux()).find((item) => item.code === code);
+    if (!niveau?.actif)
+      throw new BadRequestException(
+        `Le niveau ${code} n'existe pas : ajoutez-le dans « Structure académique »`,
+      );
+    return niveau.code;
+  }
+
+  private niveauData(body: Body) {
+    return {
+      ...(body.libelle !== undefined
+        ? { libelle: texteRequis(body.libelle, 'Le libellé', 2, 80) }
+        : {}),
+      ...(body.cycle !== undefined
+        ? { cycle: texteRequis(body.cycle, 'Le cycle', 2, 40) }
+        : {}),
+      ...(body.rang !== undefined
+        ? { rang: parseEntier(body.rang, 'Le rang', 1, 12) }
+        : {}),
+      ...(body.diplome !== undefined
+        ? {
+            diplome:
+              typeof body.diplome === 'string' && body.diplome.trim()
+                ? body.diplome.trim().slice(0, 160)
+                : null,
+          }
+        : {}),
+      ...(body.actif !== undefined ? { actif: body.actif === true } : {}),
+    };
+  }
+
+  async createNiveau(body: Body) {
+    await this.niveaux();
+    const code = texteRequis(body.code, 'Le code', 1, 12)
+      .toUpperCase()
+      .replace(/\s+/g, '');
+    texteRequis(body.libelle, 'Le libellé', 2, 80);
+    parseEntier(body.rang, 'Le rang', 1, 12);
+    return this.unique(
+      () =>
+        this.prisma.niveau.create({
+          data: { code, ...this.niveauData(body) } as {
+            code: string;
+            libelle: string;
+            rang: number;
+          },
+        }),
+      'Ce code existe déjà, ou un autre niveau occupe ce rang dans le cycle',
+    );
+  }
+
+  async updateNiveau(id: string, body: Body) {
+    const niveau = await this.prisma.niveau.findUnique({ where: { id } });
+    if (!niveau) throw new NotFoundException('Niveau introuvable');
+    if (body.actif === false) {
+      // Un niveau qui porte des classes ouvertes ne se désactive pas.
+      const classes = await this.prisma.classe.count({
+        where: {
+          niveau: niveau.code,
+          anneeAcademique: { statut: { not: 'CLOTUREE' } },
+        },
+      });
+      if (classes)
+        throw new ConflictException(
+          `${classes} classe(s) d'une année ouverte sont en ${niveau.code}`,
+        );
+    }
+    return this.unique(
+      () =>
+        this.prisma.niveau.update({
+          where: { id },
+          data: this.niveauData(body),
+        }),
+      'Un autre niveau occupe déjà ce rang dans le cycle',
+    );
+  }
+
+  // Dernier niveau du parcours : plus de passage, tous les crédits sont exigés.
+  async finDeCycle(classe: {
+    niveau: string;
+    filiere: { niveauFinal: string | null };
+  }): Promise<boolean> {
+    return (
+      niveauSuivant(
+        await this.niveaux(),
+        classe.niveau,
+        classe.filiere.niveauFinal,
+      ) === null
+    );
+  }
+
+  // ---------- Pôles ----------
+  // Un pôle regroupe des filières. Rien n'est figé : on en ajoute, on les
+  // renomme, on déplace une filière d'un pôle à l'autre.
+
+  poles() {
+    return this.prisma.pole.findMany({
+      orderBy: [{ ordre: 'asc' }, { nom: 'asc' }],
+      include: { filieres: { orderBy: { nom: 'asc' } } },
+    });
+  }
+
+  private poleData(body: Body) {
+    return {
+      ...(body.nom !== undefined
+        ? { nom: texteRequis(body.nom, 'Le nom du pôle', 2, 80) }
+        : {}),
+      ...(body.description !== undefined
+        ? {
+            description:
+              typeof body.description === 'string' && body.description.trim()
+                ? body.description.trim().slice(0, 600)
+                : null,
+          }
+        : {}),
+      ...(body.ordre !== undefined
+        ? { ordre: parseEntier(body.ordre, "L'ordre", 0, 999) }
+        : {}),
+      ...(body.actif !== undefined ? { actif: body.actif === true } : {}),
+    };
+  }
+
+  // « pôle santé » et « Pôle Santé » sont le même pôle.
+  private async refuserDoublonPole(nom: unknown, saufId?: string) {
+    if (nom === undefined) return;
+    const existant = await this.prisma.pole.findFirst({
+      where: {
+        nom: {
+          equals: texteRequis(nom, 'Le nom du pôle', 2, 80),
+          mode: 'insensitive',
+        },
+        ...(saufId ? { id: { not: saufId } } : {}),
+      },
+    });
+    if (existant) throw new ConflictException('Un pôle porte déjà ce nom');
+  }
+
+  async createPole(body: Body) {
+    await this.refuserDoublonPole(body.nom);
+    const dernier = await this.prisma.pole.aggregate({ _max: { ordre: true } });
+    return this.unique(
+      () =>
+        this.prisma.pole.create({
+          data: {
+            ordre: (dernier._max.ordre ?? 0) + 1,
+            ...this.poleData(body),
+          } as { nom: string },
+          include: { filieres: true },
+        }),
+      'Un pôle porte déjà ce nom',
+    );
+  }
+
+  async updatePole(id: string, body: Body) {
+    await this.refuserDoublonPole(body.nom, id);
+    return this.unique(
+      () =>
+        this.prisma.pole.update({
+          where: { id },
+          data: this.poleData(body),
+          include: { filieres: { orderBy: { nom: 'asc' } } },
+        }),
+      'Un pôle porte déjà ce nom',
+    );
+  }
+
+  // Charge l'organisation de départ sans rien écraser : un pôle ou une filière
+  // déjà présents sont gardés tels quels, une filière sans pôle est rattachée.
+  async chargerStructureType() {
+    return this.prisma.$transaction(async (transaction) => {
+      const bilan = { poles: 0, filieres: 0, rattachees: 0 };
+      for (const [index, modele] of STRUCTURE_TYPE.entries()) {
+        let pole = await transaction.pole.findFirst({
+          where: { nom: { equals: modele.nom, mode: 'insensitive' } },
+        });
+        if (!pole) {
+          pole = await transaction.pole.create({
+            data: {
+              nom: modele.nom,
+              description: modele.description,
+              ordre: index + 1,
+            },
+          });
+          bilan.poles += 1;
+        }
+        for (const [code, nom] of modele.filieres) {
+          const existante = await transaction.filiere.findFirst({
+            where: { nom: { equals: nom, mode: 'insensitive' } },
+          });
+          if (existante) {
+            if (!existante.poleId) {
+              await transaction.filiere.update({
+                where: { id: existante.id },
+                data: { poleId: pole.id },
+              });
+              bilan.rattachees += 1;
+            }
+            continue;
+          }
+          // Un code déjà pris par une autre filière reçoit un suffixe.
+          let libre = code;
+          for (
+            let suffixe = 2;
+            await transaction.filiere.findUnique({ where: { code: libre } });
+            suffixe += 1
+          )
+            libre = `${code}${suffixe}`;
+          await transaction.filiere.create({
+            data: { code: libre, nom, poleId: pole.id },
+          });
+          bilan.filieres += 1;
+        }
+      }
+      return bilan;
+    });
+  }
+
   // ---------- Filières et salles ----------
 
   filieres() {
-    return this.prisma.filiere.findMany({ orderBy: { nom: 'asc' } });
+    return this.prisma.filiere.findMany({
+      orderBy: { nom: 'asc' },
+      include: { pole: { select: { id: true, nom: true } } },
+    });
   }
 
-  createFiliere(body: Body) {
+  // Dernier niveau d'une filière : absent, on n'y touche pas ; vide, la filière
+  // va jusqu'au bout du cycle.
+  private async niveauFinalDe(body: Body) {
+    if (body.niveauFinal === undefined) return {};
+    if (body.niveauFinal === null || body.niveauFinal === '')
+      return { niveauFinal: null };
+    return { niveauFinal: await this.exigerNiveau(body.niveauFinal) };
+  }
+
+  // Inscriptions dont la filière n'est qu'un texte saisi à la main, regroupées
+  // par texte, avec la filière du référentiel qui lui ressemble le plus.
+  async filieresARapprocher() {
+    const [groupes, filieres] = await Promise.all([
+      this.prisma.inscription.groupBy({
+        by: ['filiere'],
+        where: { filiereId: null },
+        _count: { _all: true },
+      }),
+      this.prisma.filiere.findMany({ orderBy: { nom: 'asc' } }),
+    ]);
+    return groupes
+      .map((groupe) => {
+        const proche = filiereProche(groupe.filiere, filieres);
+        return {
+          texte: groupe.filiere,
+          inscriptions: groupe._count._all,
+          suggestion: proche ? { id: proche.id, nom: proche.nom } : null,
+        };
+      })
+      .sort((a, b) => b.inscriptions - a.inscriptions);
+  }
+
+  // Rattache à une filière toutes les inscriptions qui portent ce texte.
+  async rapprocher(body: Body) {
+    const texte = typeof body.texte === 'string' ? body.texte : '';
+    const filiere = await this.prisma.filiere.findUnique({
+      where: { id: texteRequis(body.filiereId, 'La filière', 1, 60) },
+    });
+    if (!filiere) throw new NotFoundException('Filière introuvable');
+    const resultat = await this.prisma.inscription.updateMany({
+      where: { filiere: texte, filiereId: null },
+      data: { filiereId: filiere.id, filiere: filiere.nom },
+    });
+    return { rapprochees: resultat.count, filiere: filiere.nom };
+  }
+
+  // Pôle d'une filière : absent, on n'y touche pas ; vide, on la détache.
+  private async poleDe(body: Body) {
+    if (body.poleId === undefined) return {};
+    if (body.poleId === null || body.poleId === '') return { poleId: null };
+    const pole = await this.prisma.pole.findUnique({
+      where: { id: texteRequis(body.poleId, 'Le pôle', 1, 60) },
+    });
+    if (!pole) throw new NotFoundException('Pôle introuvable');
+    return { poleId: pole.id };
+  }
+
+  async createFiliere(body: Body) {
+    const pole = await this.poleDe(body);
+    const niveauFinal = await this.niveauFinalDe(body);
     return this.unique(
       () =>
         this.prisma.filiere.create({
           data: {
             code: texteRequis(body.code, 'Le code', 2, 12).toUpperCase(),
             nom: texteRequis(body.nom, 'Le nom de la filière', 2, 120),
+            ...pole,
+            ...niveauFinal,
           },
+          include: { pole: { select: { id: true, nom: true } } },
         }),
       'Une filière porte déjà ce code ou ce nom',
     );
   }
 
-  updateFiliere(id: string, body: Body) {
+  async updateFiliere(id: string, body: Body) {
+    const pole = await this.poleDe(body);
+    const niveauFinal = await this.niveauFinalDe(body);
     return this.unique(
       () =>
         this.prisma.filiere.update({
           where: { id },
+          include: { pole: { select: { id: true, nom: true } } },
           data: {
+            ...pole,
+            ...niveauFinal,
             ...(body.code !== undefined
               ? { code: texteRequis(body.code, 'Le code', 2, 12).toUpperCase() }
               : {}),
@@ -333,30 +697,20 @@ export class StructureService {
     return `${classe.filiere.code} ${classe.niveau}${classe.groupe === 'A' ? '' : ` ${classe.groupe}`}`;
   }
 
-  async classes(anneeId?: string) {
+  async classes(anneeId?: string, poleId?: string) {
     const annee = anneeId
       ? await this.prisma.anneeAcademique.findUnique({ where: { id: anneeId } })
-      : // Par défaut : l'année qui couvre la date du jour, sinon la plus récente.
-        ((await this.prisma.anneeAcademique.findFirst({
-          where: {
-            statut: { not: 'CLOTUREE' },
-            dateDebut: { lte: new Date() },
-            dateFin: { gte: new Date() },
-          },
-          orderBy: { dateDebut: 'desc' },
-        })) ??
-        (await this.prisma.anneeAcademique.findFirst({
-          where: { statut: 'EN_COURS' },
-          orderBy: { dateDebut: 'desc' },
-        })) ??
-        (await this.prisma.anneeAcademique.findFirst({
-          orderBy: { dateDebut: 'desc' },
-        })));
+      : await this.anneeCourante();
     const classes = await this.prisma.classe.findMany({
       // Sans année connue, la liste est simplement vide.
-      where: { anneeAcademiqueId: annee?.id ?? '' },
+      where: {
+        anneeAcademiqueId: annee?.id ?? '',
+        ...(poleId
+          ? { filiere: { poleId: poleId === 'aucun' ? null : poleId } }
+          : {}),
+      },
       include: {
-        filiere: true,
+        filiere: { include: { pole: { select: { id: true, nom: true } } } },
         _count: { select: { inscriptions: true, cours: true } },
         deliberations: { select: { semestre: true, statut: true } },
       },
@@ -379,7 +733,7 @@ export class StructureService {
   async createClasse(body: Body) {
     const anneeAcademiqueId = texteRequis(body.anneeAcademiqueId, "L'année");
     const filiereId = texteRequis(body.filiereId, 'La filière');
-    const niveau = choix(body.niveau, NIVEAUX, 'Le niveau');
+    const niveau = await this.exigerNiveau(body.niveau);
     const groupe = (
       typeof body.groupe === 'string' && body.groupe.trim()
         ? body.groupe.trim()
@@ -436,7 +790,8 @@ export class StructureService {
     return classe;
   }
 
-  // Une classe enseigne toutes les matières actives de la maquette de sa filière et de son niveau.
+  // Une classe enseigne toutes les matières actives de la maquette de sa filière,
+  // de son niveau et de son année.
   async synchroniserCours(classeId: string) {
     const classe = await this.prisma.classe.findUnique({
       where: { id: classeId },
@@ -446,7 +801,11 @@ export class StructureService {
     const matieres = await this.prisma.matiere.findMany({
       where: {
         actif: true,
-        ue: { filiereId: classe.filiereId, niveau: classe.niveau },
+        ue: {
+          anneeAcademiqueId: classe.anneeAcademiqueId,
+          filiereId: classe.filiereId,
+          niveau: classe.niveau,
+        },
       },
       select: { id: true },
     });
@@ -502,8 +861,10 @@ export class StructureService {
       filiere: inscription.filiere,
       statut: inscription.statut,
       personne: inscription.personne,
-      // La filière saisie à l'inscription correspond-elle à celle de la classe ?
-      correspond: cibles.includes(normaliser(inscription.filiere)),
+      // Le lien vers le référentiel fait foi ; sans lien, on compare le texte saisi.
+      correspond: inscription.filiereId
+        ? inscription.filiereId === classe.filiereId
+        : cibles.includes(normaliser(inscription.filiere)),
     }));
   }
 
@@ -550,9 +911,14 @@ export class StructureService {
             `Capacité dépassée : ${classe.capacite} places, ${effectif} occupées`,
           );
       }
+      // L'affectation fixe la filière de l'inscription : celle de la classe.
       await transaction.inscription.updateMany({
         where: { id: { in: ids }, classeId: null },
-        data: { classeId },
+        data: {
+          classeId,
+          filiereId: classe.filiereId,
+          filiere: classe.filiere.nom,
+        },
       });
       // Premier passage en classe : l'étudiant reçoit son matricule définitif.
       const debut = classe.anneeAcademique.libelle.slice(2, 4);
@@ -602,14 +968,36 @@ export class StructureService {
   }
 
   // ---------- Maquette ----------
+  // Une maquette vaut pour une filière, un niveau et une année. Celle d'une
+  // année clôturée ne se modifie plus.
 
-  async maquette(filiereId: string, niveau: string) {
+  private async anneeMaquette(anneeId?: string | null) {
+    if (!anneeId) return this.anneeCourante();
+    const annee = await this.prisma.anneeAcademique.findUnique({
+      where: { id: anneeId },
+    });
+    if (!annee) throw new NotFoundException('Année académique introuvable');
+    return annee;
+  }
+
+  private refuserAnneeCloturee(
+    annee: { libelle: string; statut: string } | null,
+  ) {
+    if (annee?.statut === 'CLOTUREE')
+      throw new ConflictException(
+        `L'année ${annee.libelle} est clôturée : sa maquette ne se modifie plus`,
+      );
+  }
+
+  async maquette(filiereId: string, niveau: string, anneeId?: string) {
+    const annee = await this.anneeMaquette(anneeId);
     const unites = await this.prisma.uniteEnseignement.findMany({
-      where: { filiereId, niveau },
+      where: { filiereId, niveau, anneeAcademiqueId: annee?.id ?? null },
       include: { matieres: { orderBy: { code: 'asc' } } },
       orderBy: [{ semestre: 'asc' }, { ordre: 'asc' }, { code: 'asc' }],
     });
     return {
+      annee,
       unites,
       // Un semestre compte normalement 30 crédits.
       credits: [1, 2].map((semestre) => ({
@@ -621,13 +1009,34 @@ export class StructureService {
     };
   }
 
-  private async classesDeLaMaquette(filiereId: string, niveau: string) {
+  // Maquettes déjà posées pour une année : filière, niveau, unités et crédits.
+  async maquettes(anneeId?: string) {
+    const annee = await this.anneeMaquette(anneeId);
+    const groupes = await this.prisma.uniteEnseignement.groupBy({
+      by: ['filiereId', 'niveau'],
+      where: { anneeAcademiqueId: annee?.id ?? null },
+      _count: { _all: true },
+      _sum: { credits: true },
+    });
+    return {
+      annee,
+      maquettes: groupes.map((groupe) => ({
+        filiereId: groupe.filiereId,
+        niveau: groupe.niveau,
+        unites: groupe._count._all,
+        credits: groupe._sum.credits ?? 0,
+      })),
+    };
+  }
+
+  private async classesDeLaMaquette(
+    filiereId: string,
+    niveau: string,
+    anneeId: string | null,
+  ) {
+    if (!anneeId) return;
     const classes = await this.prisma.classe.findMany({
-      where: {
-        filiereId,
-        niveau,
-        anneeAcademique: { statut: { not: 'CLOTUREE' } },
-      },
+      where: { filiereId, niveau, anneeAcademiqueId: anneeId },
       select: { id: true },
     });
     for (const classe of classes) await this.synchroniserCours(classe.id);
@@ -635,15 +1044,31 @@ export class StructureService {
 
   async createUnite(body: Body) {
     const filiereId = texteRequis(body.filiereId, 'La filière');
-    const niveau = choix(body.niveau, NIVEAUX, 'Le niveau');
+    const niveau = await this.exigerNiveau(body.niveau);
+    const annee = await this.anneeMaquette(
+      typeof body.anneeAcademiqueId === 'string'
+        ? body.anneeAcademiqueId
+        : null,
+    );
+    this.refuserAnneeCloturee(annee);
+    const code = texteRequis(body.code, 'Le code', 1, 20).toUpperCase();
+    // Sans année, la base ne garantit pas l'unicité : on la vérifie ici.
+    const existante = await this.prisma.uniteEnseignement.findFirst({
+      where: { anneeAcademiqueId: annee?.id ?? null, filiereId, niveau, code },
+    });
+    if (existante)
+      throw new ConflictException(
+        'Une unité porte déjà ce code dans cette maquette',
+      );
     return this.unique(
       () =>
         this.prisma.uniteEnseignement.create({
           data: {
+            anneeAcademiqueId: annee?.id ?? null,
             filiereId,
             niveau,
             semestre: parseEntier(body.semestre, 'Le semestre', 1, 2),
-            code: texteRequis(body.code, 'Le code', 1, 20).toUpperCase(),
+            code,
             nom: texteRequis(body.nom, "Le nom de l'unité", 2, 160),
             credits: parseEntier(body.credits, 'Les crédits', 1, 60),
             ordre:
@@ -656,7 +1081,21 @@ export class StructureService {
     );
   }
 
-  updateUnite(id: string, body: Body) {
+  private async uniteModifiable(id: string) {
+    const unite = await this.prisma.uniteEnseignement.findUnique({
+      where: { id },
+      include: {
+        anneeAcademique: true,
+        _count: { select: { matieres: true } },
+      },
+    });
+    if (!unite) throw new NotFoundException('Unité introuvable');
+    this.refuserAnneeCloturee(unite.anneeAcademique);
+    return unite;
+  }
+
+  async updateUnite(id: string, body: Body) {
+    await this.uniteModifiable(id);
     return this.unique(
       () =>
         this.prisma.uniteEnseignement.update({
@@ -681,11 +1120,7 @@ export class StructureService {
   }
 
   async removeUnite(id: string) {
-    const unite = await this.prisma.uniteEnseignement.findUnique({
-      where: { id },
-      include: { _count: { select: { matieres: true } } },
-    });
-    if (!unite) throw new NotFoundException('Unité introuvable');
+    const unite = await this.uniteModifiable(id);
     if (unite._count.matieres > 0)
       throw new ConflictException(
         "Retirez d'abord les matières de cette unité",
@@ -694,12 +1129,330 @@ export class StructureService {
     return { supprime: true };
   }
 
+  // ---------- Copie et import de maquettes ----------
+
+  // Ajoute des unités et leurs matières à une maquette sans rien écraser : une
+  // unité déjà présente (même code) est gardée, seules ses matières manquantes
+  // sont ajoutées.
+  private async ajouterUnites(
+    transaction: Transaction,
+    cible: CibleMaquette,
+    unites: UniteMaquette[],
+  ) {
+    const bilan = { unites: 0, matieres: 0, dejaPresentes: 0 };
+    const existantes = await transaction.uniteEnseignement.findMany({
+      where: {
+        anneeAcademiqueId: cible.anneeId,
+        filiereId: cible.filiereId,
+        niveau: cible.niveau,
+      },
+      include: { matieres: { select: { code: true } } },
+    });
+    for (const unite of unites) {
+      let presente = existantes.find((item) => item.code === unite.code);
+      if (presente) bilan.dejaPresentes += 1;
+      else {
+        presente = {
+          ...(await transaction.uniteEnseignement.create({
+            data: {
+              anneeAcademiqueId: cible.anneeId,
+              filiereId: cible.filiereId,
+              niveau: cible.niveau,
+              semestre: unite.semestre,
+              code: unite.code,
+              nom: unite.nom,
+              credits: unite.credits,
+              ordre: unite.ordre ?? 0,
+            },
+          })),
+          matieres: [],
+        };
+        existantes.push(presente);
+        bilan.unites += 1;
+      }
+      const codes = new Set(presente.matieres.map((matiere) => matiere.code));
+      const nouvelles = unite.matieres.filter(
+        (matiere) => !codes.has(matiere.code),
+      );
+      if (!nouvelles.length) continue;
+      await transaction.matiere.createMany({
+        data: nouvelles.map((matiere) => ({
+          ueId: presente.id,
+          code: matiere.code,
+          nom: matiere.nom,
+          coefficient: matiere.coefficient,
+          volumeHoraire: matiere.volumeHoraire,
+          actif: matiere.actif ?? true,
+        })),
+      });
+      presente.matieres.push(...nouvelles.map(({ code }) => ({ code })));
+      bilan.matieres += nouvelles.length;
+    }
+    return bilan;
+  }
+
+  private async unitesDe(source: CibleMaquette): Promise<UniteMaquette[]> {
+    const unites = await this.prisma.uniteEnseignement.findMany({
+      where: {
+        anneeAcademiqueId: source.anneeId,
+        filiereId: source.filiereId,
+        niveau: source.niveau,
+      },
+      include: { matieres: true },
+      orderBy: [{ semestre: 'asc' }, { ordre: 'asc' }, { code: 'asc' }],
+    });
+    return unites.map((unite) => ({
+      semestre: unite.semestre,
+      code: unite.code,
+      nom: unite.nom,
+      credits: unite.credits,
+      ordre: unite.ordre,
+      matieres: unite.matieres.map((matiere) => ({
+        code: matiere.code,
+        nom: matiere.nom,
+        coefficient: Number(matiere.coefficient),
+        volumeHoraire: matiere.volumeHoraire,
+        actif: matiere.actif,
+      })),
+    }));
+  }
+
+  // Copie une maquette (ou seulement certaines de ses unités : un tronc commun)
+  // vers d'autres filières, d'autres niveaux ou une autre année.
+  async copierMaquette(body: Body) {
+    const source = (body.source ?? {}) as Body;
+    const anneeSource = await this.anneeMaquette(
+      typeof source.anneeId === 'string' ? source.anneeId : null,
+    );
+    const anneeCible = await this.anneeMaquette(
+      typeof body.anneeCibleId === 'string'
+        ? body.anneeCibleId
+        : (anneeSource?.id ?? null),
+    );
+    this.refuserAnneeCloturee(anneeCible);
+    const origine = {
+      anneeId: anneeSource?.id ?? null,
+      filiereId: texteRequis(source.filiereId, 'La filière à copier'),
+      niveau: texteRequis(source.niveau, 'Le niveau à copier', 1, 12),
+    };
+    const choisies = Array.isArray(body.unites)
+      ? new Set(body.unites.filter((code) => typeof code === 'string'))
+      : null;
+    const unites = (await this.unitesDe(origine)).filter(
+      (unite) => !choisies || choisies.has(unite.code),
+    );
+    if (!unites.length)
+      throw new BadRequestException(
+        "La maquette à copier n'a aucune unité d'enseignement",
+      );
+    const cibles: CibleMaquette[] = [];
+    for (const item of Array.isArray(body.cibles)
+      ? (body.cibles as Body[])
+      : []) {
+      const filiere = await this.prisma.filiere.findUnique({
+        where: {
+          id: texteRequis(item?.filiereId, 'La filière de destination'),
+        },
+      });
+      if (!filiere) throw new NotFoundException('Filière introuvable');
+      const cible = {
+        anneeId: anneeCible?.id ?? null,
+        filiereId: filiere.id,
+        niveau: await this.exigerNiveau(item?.niveau),
+      };
+      if (
+        cible.anneeId !== origine.anneeId ||
+        cible.filiereId !== origine.filiereId ||
+        cible.niveau !== origine.niveau
+      )
+        cibles.push(cible);
+    }
+    if (!cibles.length)
+      throw new BadRequestException(
+        'Choisissez au moins une maquette de destination, différente de la source',
+      );
+    const bilan = await this.prisma.$transaction(async (transaction) => {
+      const total = { maquettes: 0, unites: 0, matieres: 0, dejaPresentes: 0 };
+      for (const cible of cibles) {
+        const partiel = await this.ajouterUnites(transaction, cible, unites);
+        total.maquettes += 1;
+        total.unites += partiel.unites;
+        total.matieres += partiel.matieres;
+        total.dejaPresentes += partiel.dejaPresentes;
+      }
+      return total;
+    });
+    for (const cible of cibles)
+      await this.classesDeLaMaquette(
+        cible.filiereId,
+        cible.niveau,
+        cible.anneeId,
+      );
+    return bilan;
+  }
+
+  // Reprend dans une année toutes les maquettes d'une autre, sans toucher à
+  // celles qui y existent déjà.
+  async reconduire(sourceAnneeId: string, cibleAnneeId: string) {
+    const [source, cible] = await Promise.all([
+      this.anneeMaquette(sourceAnneeId),
+      this.anneeMaquette(cibleAnneeId),
+    ]);
+    if (!source || !cible || source.id === cible.id)
+      throw new BadRequestException('Choisissez deux années différentes');
+    this.refuserAnneeCloturee(cible);
+    const groupes = await this.prisma.uniteEnseignement.groupBy({
+      by: ['filiereId', 'niveau'],
+      where: { anneeAcademiqueId: source.id },
+    });
+    const total = { maquettes: 0, unites: 0, matieres: 0, dejaPresentes: 0 };
+    for (const groupe of groupes) {
+      const unites = await this.unitesDe({ anneeId: source.id, ...groupe });
+      const partiel = await this.prisma.$transaction((transaction) =>
+        this.ajouterUnites(
+          transaction,
+          { anneeId: cible.id, ...groupe },
+          unites,
+        ),
+      );
+      total.maquettes += partiel.unites || partiel.matieres ? 1 : 0;
+      total.unites += partiel.unites;
+      total.matieres += partiel.matieres;
+      total.dejaPresentes += partiel.dejaPresentes;
+      await this.classesDeLaMaquette(groupe.filiereId, groupe.niveau, cible.id);
+    }
+    return total;
+  }
+
+  reconduireMaquettes(body: Body) {
+    return this.reconduire(
+      texteRequis(body.sourceAnneeId, "L'année à reprendre"),
+      texteRequis(body.cibleAnneeId, "L'année de destination"),
+    );
+  }
+
+  // Import d'un fichier : une ligne par matière (ou par unité sans matière).
+  // Tout le fichier est contrôlé avant la première écriture.
+  async importerMaquette(body: Body) {
+    const annee = await this.anneeMaquette(
+      typeof body.anneeAcademiqueId === 'string'
+        ? body.anneeAcademiqueId
+        : null,
+    );
+    this.refuserAnneeCloturee(annee);
+    const filiere = await this.prisma.filiere.findUnique({
+      where: { id: texteRequis(body.filiereId, 'La filière') },
+    });
+    if (!filiere) throw new NotFoundException('Filière introuvable');
+    const niveau = await this.exigerNiveau(body.niveau);
+    const lignes = Array.isArray(body.lignes) ? (body.lignes as Body[]) : [];
+    if (!lignes.length) throw new BadRequestException('Le fichier est vide');
+    if (lignes.length > 1000)
+      throw new BadRequestException('Le fichier dépasse 1 000 lignes');
+    const unites = new Map<string, UniteMaquette>();
+    lignes.forEach((ligne, index) => {
+      const ou = `Ligne ${index + 1}`;
+      try {
+        const code = texteRequis(
+          ligne?.codeUnite,
+          "Le code de l'unité",
+          1,
+          20,
+        ).toUpperCase();
+        let unite = unites.get(code);
+        if (!unite) {
+          unite = {
+            semestre: parseEntier(ligne.semestre, 'Le semestre', 1, 2),
+            code,
+            nom: texteRequis(ligne.nomUnite, "Le nom de l'unité", 2, 160),
+            credits: parseEntier(ligne.credits, 'Les crédits', 1, 60),
+            ordre: unites.size + 1,
+            matieres: [],
+          };
+          unites.set(code, unite);
+        }
+        const vide = (value: unknown) =>
+          value === undefined || value === null || value === '';
+        if (vide(ligne.codeMatiere) && vide(ligne.nomMatiere)) return;
+        const matiere = {
+          code: texteRequis(
+            ligne.codeMatiere,
+            'Le code de la matière',
+            1,
+            20,
+          ).toUpperCase(),
+          nom: texteRequis(ligne.nomMatiere, 'Le nom de la matière', 2, 160),
+          coefficient: parseNombre(
+            vide(ligne.coefficient) ? 1 : ligne.coefficient,
+            'Le coefficient',
+            0.25,
+            20,
+          ),
+          volumeHoraire: parseEntier(
+            vide(ligne.volumeHoraire) ? 0 : ligne.volumeHoraire,
+            'Le volume horaire',
+            0,
+            1000,
+          ),
+        };
+        if (unite.matieres.some((item) => item.code === matiere.code))
+          throw new BadRequestException(
+            `la matière ${matiere.code} apparaît deux fois dans l'unité ${code}`,
+          );
+        unite.matieres.push(matiere);
+      } catch (error) {
+        throw new BadRequestException(
+          `${ou} : ${error instanceof Error ? error.message : 'ligne invalide'}`,
+        );
+      }
+    });
+    const cible = { anneeId: annee?.id ?? null, filiereId: filiere.id, niveau };
+    const bilan = await this.prisma.$transaction((transaction) =>
+      this.ajouterUnites(transaction, cible, [...unites.values()]),
+    );
+    await this.classesDeLaMaquette(cible.filiereId, niveau, cible.anneeId);
+    return bilan;
+  }
+
+  // ---------- Unités déjà acquises ----------
+
+  // Unités qu'un étudiant de la classe a validées lors d'une année précédente
+  // dans la même filière et le même niveau : un redoublant ne les repasse pas.
+  async unitesAcquises(classe: {
+    id: string;
+    filiereId: string;
+    niveau: string;
+  }) {
+    const credits = await this.prisma.creditUE.findMany({
+      where: {
+        statut: 'ACQUISE',
+        filiereId: classe.filiereId,
+        niveau: classe.niveau,
+        personne: { inscriptions: { some: { classeId: classe.id } } },
+        NOT: { inscription: { classeId: classe.id } },
+      },
+      select: { personneId: true, code: true, moyenne: true, annee: true },
+    });
+    const parPersonne = new Map<
+      string,
+      Map<string, { moyenne: number | null; annee: string }>
+    >();
+    for (const credit of credits) {
+      const unites =
+        parPersonne.get(credit.personneId) ??
+        new Map<string, { moyenne: number | null; annee: string }>();
+      unites.set(credit.code, {
+        moyenne: credit.moyenne === null ? null : Number(credit.moyenne),
+        annee: credit.annee,
+      });
+      parPersonne.set(credit.personneId, unites);
+    }
+    return parPersonne;
+  }
+
   async createMatiere(body: Body) {
     const ueId = texteRequis(body.ueId, "L'unité d'enseignement");
-    const unite = await this.prisma.uniteEnseignement.findUnique({
-      where: { id: ueId },
-    });
-    if (!unite) throw new NotFoundException('Unité introuvable');
+    const unite = await this.uniteModifiable(ueId);
     const matiere = await this.unique(
       () =>
         this.prisma.matiere.create({
@@ -723,11 +1476,26 @@ export class StructureService {
         }),
       'Une matière porte déjà ce code dans cette unité',
     );
-    await this.classesDeLaMaquette(unite.filiereId, unite.niveau);
+    await this.classesDeLaMaquette(
+      unite.filiereId,
+      unite.niveau,
+      unite.anneeAcademiqueId,
+    );
+    return matiere;
+  }
+
+  private async matiereModifiable(id: string) {
+    const matiere = await this.prisma.matiere.findUnique({
+      where: { id },
+      include: { ue: { include: { anneeAcademique: true } } },
+    });
+    if (!matiere) throw new NotFoundException('Matière introuvable');
+    this.refuserAnneeCloturee(matiere.ue.anneeAcademique);
     return matiere;
   }
 
   async updateMatiere(id: string, body: Body) {
+    await this.matiereModifiable(id);
     const matiere = await this.unique(
       () =>
         this.prisma.matiere.update({
@@ -766,12 +1534,17 @@ export class StructureService {
       'Une matière porte déjà ce code dans cette unité',
     );
     if (matiere.actif)
-      await this.classesDeLaMaquette(matiere.ue.filiereId, matiere.ue.niveau);
+      await this.classesDeLaMaquette(
+        matiere.ue.filiereId,
+        matiere.ue.niveau,
+        matiere.ue.anneeAcademiqueId,
+      );
     return matiere;
   }
 
   // Une matière déjà enseignée ou notée ne disparaît pas : elle se désactive.
   async removeMatiere(id: string) {
+    await this.matiereModifiable(id);
     const utilises = await this.prisma.cours.count({
       where: {
         matiereId: id,

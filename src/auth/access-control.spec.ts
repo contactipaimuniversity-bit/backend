@@ -23,6 +23,15 @@ describe('requiredPermissionForRequest', () => {
     ]);
   });
 
+  it('requires a dedicated permission to cancel a payment', () => {
+    expect(
+      requiredPermissionForRequest('/paiements/123/annulation', 'POST'),
+    ).toEqual(['edit:payment-cancellation']);
+    expect(
+      requiredPermissionForRequest('/paiements/123/affectation', 'PATCH'),
+    ).toEqual(['edit:payments']);
+  });
+
   it('does not apply module permissions to similarly prefixed routes', () => {
     expect(
       requiredPermissionForRequest('/personnes-archive', 'GET'),

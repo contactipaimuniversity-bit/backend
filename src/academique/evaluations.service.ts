@@ -9,15 +9,35 @@ import { Acteur, peut } from '../common/acteur';
 import {
   choix,
   dateOptionnelle,
+  minutes,
+  parseDate,
+  parseHeure,
   parseNombre,
   texteOptionnel,
   texteRequis,
 } from '../common/saisie';
 import { PrismaService } from '../prisma/prisma.service';
-import { resultatMatiere, TYPES_EVALUATION } from './academique.rules';
+import {
+  chevauche,
+  normaliser,
+  resultatMatiere,
+  TYPES_EVALUATION,
+} from './academique.rules';
 import { StructureService } from './structure.service';
 
 type Body = Record<string, unknown>;
+
+type Epreuve = {
+  id?: string;
+  classeId: string;
+  date: Date | null;
+  heureDebut: string | null;
+  heureFin: string | null;
+  salleId: string | null;
+  surveillant: string | null;
+};
+
+const jourDe = (date: Date) => date.toISOString().slice(0, 10);
 
 // Évaluations d'un cours et saisie des notes, jusqu'à leur verrouillage.
 @Injectable()
@@ -47,23 +67,26 @@ export class EvaluationsService {
 
   async grille(coursId: string, acteur: Acteur) {
     const cours = await this.structure.exigerCours(coursId, acteur);
-    const [etudiants, evaluations, regles, clos] = await Promise.all([
-      this.prisma.inscription.findMany({
-        where: { classeId: cours.classeId, statut: { not: 'ABANDONNEE' } },
-        include: { personne: true },
-        orderBy: [
-          { personne: { nom: 'asc' } },
-          { personne: { prenom: 'asc' } },
-        ],
-      }),
-      this.prisma.evaluation.findMany({
-        where: { coursId },
-        include: { notes: true, salle: true },
-        orderBy: [{ date: 'asc' }, { libelle: 'asc' }],
-      }),
-      this.structure.regles(),
-      this.semestreClos(cours.classeId, cours.matiere.ue.semestre),
-    ]);
+    const [etudiants, dispenses, evaluations, regles, clos] = await Promise.all(
+      [
+        this.prisma.inscription.findMany({
+          where: { classeId: cours.classeId, statut: { not: 'ABANDONNEE' } },
+          include: { personne: true },
+          orderBy: [
+            { personne: { nom: 'asc' } },
+            { personne: { prenom: 'asc' } },
+          ],
+        }),
+        this.dispenses(cours),
+        this.prisma.evaluation.findMany({
+          where: { coursId },
+          include: { notes: true, salle: true },
+          orderBy: [{ date: 'asc' }, { libelle: 'asc' }],
+        }),
+        this.structure.regles(),
+        this.semestreClos(cours.classeId, cours.matiere.ue.semestre),
+      ],
+    );
     return {
       cours: {
         id: cours.id,
@@ -107,6 +130,8 @@ export class EvaluationsService {
           personne: inscription.personne,
           notes,
           ...resultatMatiere(notes, regles),
+          // Unité déjà acquise une année précédente : rien à noter.
+          dispense: dispenses.has(inscription.personneId),
         };
       }),
     };
@@ -139,21 +164,214 @@ export class EvaluationsService {
           "Le rattrapage ne s'organise qu'après validation des notes de l'examen",
         );
     }
+    const epreuve = {
+      classeId: cours.classeId,
+      date: dateOptionnelle(body.date, 'La date'),
+      ...this.horaire(body.heureDebut, body.heureFin),
+      salleId:
+        typeof body.salleId === 'string' && body.salleId ? body.salleId : null,
+      surveillant: texteOptionnel(body.surveillant, 160),
+    };
+    await this.verifierConflits(epreuve);
+    const { classeId, ...planification } = epreuve;
+    void classeId;
     return this.prisma.evaluation.create({
       data: {
         coursId: cours.id,
         type,
         libelle: texteRequis(body.libelle, "L'intitulé", 2, 120),
-        date: dateOptionnelle(body.date, 'La date'),
         bareme: parseNombre(body.bareme ?? 20, 'Le barème', 1, 100),
-        salleId:
-          typeof body.salleId === 'string' && body.salleId
-            ? body.salleId
-            : null,
-        surveillant: texteOptionnel(body.surveillant, 160),
+        ...planification,
         creeParNom: acteur.nom,
       },
     });
+  }
+
+  // Les étudiants de la classe qui ont déjà acquis l'unité de ce cours.
+  private async dispenses(cours: {
+    classeId: string;
+    classe: { filiereId: string; niveau: string };
+    matiere: { ue: { code: string } };
+  }): Promise<Set<string>> {
+    const acquises = await this.structure.unitesAcquises({
+      id: cours.classeId,
+      filiereId: cours.classe.filiereId,
+      niveau: cours.classe.niveau,
+    });
+    return new Set(
+      [...acquises.entries()]
+        .filter(([, unites]) => unites.has(cours.matiere.ue.code))
+        .map(([personneId]) => personneId),
+    );
+  }
+
+  // ---------- Calendrier des épreuves ----------
+
+  // Une épreuve a ses deux heures, ou aucune.
+  private horaire(debut: unknown, fin: unknown) {
+    const vide = (value: unknown) =>
+      value === undefined || value === null || value === '';
+    if (vide(debut) && vide(fin)) return { heureDebut: null, heureFin: null };
+    if (vide(debut) || vide(fin))
+      throw new BadRequestException(
+        "Indiquez l'heure de début et l'heure de fin de l'épreuve",
+      );
+    const heureDebut = parseHeure(debut, "L'heure de début");
+    const heureFin = parseHeure(fin, "L'heure de fin");
+    if (minutes(heureFin) <= minutes(heureDebut))
+      throw new BadRequestException(
+        "L'heure de fin doit suivre l'heure de début",
+      );
+    return { heureDebut, heureFin };
+  }
+
+  private epreuvesDuJour(date: Date, sansId?: string) {
+    const debut = new Date(`${jourDe(date)}T00:00:00.000Z`);
+    return this.prisma.evaluation.findMany({
+      where: {
+        date: { gte: debut, lt: new Date(debut.getTime() + 86_400_000) },
+        ...(sansId ? { id: { not: sansId } } : {}),
+      },
+      include: {
+        salle: true,
+        cours: {
+          include: { matiere: true, classe: { include: { filiere: true } } },
+        },
+      },
+    });
+  }
+
+  // Raison pour laquelle deux épreuves du même jour ne peuvent pas se tenir
+  // ensemble : même classe, même salle ou même surveillant sur des horaires
+  // qui se chevauchent.
+  private conflit(
+    epreuve: Epreuve,
+    autre: Epreuve & {
+      libelle: string;
+      salle: { nom: string } | null;
+      cours: {
+        matiere: { nom: string };
+        classe: { niveau: string; groupe: string; filiere: { code: string } };
+      };
+    },
+  ): string | null {
+    if (
+      !epreuve.heureDebut ||
+      !epreuve.heureFin ||
+      !autre.heureDebut ||
+      !autre.heureFin ||
+      !chevauche(
+        {
+          debut: minutes(epreuve.heureDebut),
+          fin: minutes(epreuve.heureFin),
+        },
+        { debut: minutes(autre.heureDebut), fin: minutes(autre.heureFin) },
+      )
+    )
+      return null;
+    const quoi = `« ${autre.libelle} » de ${autre.cours.matiere.nom} (${this.structure.nomClasse(autre.cours.classe)}) de ${autre.heureDebut} à ${autre.heureFin}`;
+    if (autre.classeId === epreuve.classeId) return `La classe a déjà ${quoi}`;
+    if (epreuve.salleId && autre.salleId === epreuve.salleId)
+      return `La salle ${autre.salle?.nom ?? ''} est prise par ${quoi}`;
+    if (
+      epreuve.surveillant &&
+      autre.surveillant &&
+      normaliser(epreuve.surveillant) === normaliser(autre.surveillant)
+    )
+      return `${epreuve.surveillant} surveille déjà ${quoi}`;
+    return null;
+  }
+
+  private async verifierConflits(epreuve: Epreuve) {
+    if (epreuve.salleId) {
+      const salle = await this.prisma.salle.findUnique({
+        where: { id: epreuve.salleId },
+      });
+      if (!salle?.actif) throw new BadRequestException('Salle indisponible');
+    }
+    if (!epreuve.date || !epreuve.heureDebut) return;
+    for (const autre of await this.epreuvesDuJour(epreuve.date, epreuve.id)) {
+      const raison = this.conflit(epreuve, {
+        ...autre,
+        classeId: autre.cours.classeId,
+      });
+      if (raison) throw new ConflictException(raison);
+    }
+  }
+
+  // Toutes les épreuves datées d'une année, dans l'ordre, avec leurs conflits.
+  async calendrier(query: { anneeId?: string; du?: string; au?: string }) {
+    const annee = query.anneeId
+      ? await this.prisma.anneeAcademique.findUnique({
+          where: { id: query.anneeId },
+        })
+      : await this.structure.anneeCourante();
+    const deLAnnee = {
+      cours: { classe: { anneeAcademiqueId: annee?.id ?? '' } },
+    };
+    const [evaluations, sansDate] = await Promise.all([
+      this.prisma.evaluation.findMany({
+        where: {
+          ...deLAnnee,
+          date: {
+            not: null,
+            ...(query.du
+              ? { gte: parseDate(query.du, 'La date de début') }
+              : {}),
+            ...(query.au ? { lte: parseDate(query.au, 'La date de fin') } : {}),
+          },
+        },
+        include: {
+          salle: true,
+          cours: {
+            include: {
+              matiere: true,
+              classe: { include: { filiere: true } },
+              enseignant: { select: { nom: true, prenom: true } },
+            },
+          },
+        },
+        orderBy: [{ date: 'asc' }, { heureDebut: 'asc' }],
+      }),
+      this.prisma.evaluation.count({ where: { ...deLAnnee, date: null } }),
+    ]);
+    const epreuves = evaluations.map((evaluation) => ({
+      ...evaluation,
+      classeId: evaluation.cours.classeId,
+    }));
+    return {
+      annee,
+      // Épreuves sans date : elles n'apparaissent pas au calendrier.
+      sansDate,
+      epreuves: epreuves.map((epreuve) => ({
+        id: epreuve.id,
+        type: epreuve.type,
+        libelle: epreuve.libelle,
+        date: epreuve.date,
+        heureDebut: epreuve.heureDebut,
+        heureFin: epreuve.heureFin,
+        statut: epreuve.statut,
+        salle: epreuve.salle?.nom ?? null,
+        surveillant: epreuve.surveillant,
+        coursId: epreuve.coursId,
+        matiere: epreuve.cours.matiere.nom,
+        classeId: epreuve.classeId,
+        classe: this.structure.nomClasse(epreuve.cours.classe),
+        enseignant: epreuve.cours.enseignant
+          ? `${epreuve.cours.enseignant.prenom} ${epreuve.cours.enseignant.nom}`
+          : null,
+        conflits: epreuves
+          .filter(
+            (autre) =>
+              autre.id !== epreuve.id &&
+              jourDe(autre.date!) === jourDe(epreuve.date!),
+          )
+          .map((autre) => this.conflit(epreuve, autre))
+          .filter((raison): raison is string => raison !== null),
+        // Sans horaire, les conflits ne peuvent pas être contrôlés.
+        horaireManquant: !epreuve.heureDebut,
+      })),
+    };
   }
 
   private async evaluationOuverte(id: string, acteur: Acteur) {
@@ -167,7 +385,7 @@ export class EvaluationsService {
   }
 
   async update(id: string, body: Body, acteur: Acteur) {
-    const { evaluation } = await this.evaluationOuverte(id, acteur);
+    const { evaluation, cours } = await this.evaluationOuverte(id, acteur);
     if (evaluation.statut !== 'OUVERTE')
       throw new ConflictException(
         'Cette évaluation est validée : elle ne se modifie plus',
@@ -176,6 +394,34 @@ export class EvaluationsService {
       throw new ConflictException(
         'Le barème ne change plus une fois des notes saisies',
       );
+    const horaire =
+      body.heureDebut !== undefined || body.heureFin !== undefined
+        ? this.horaire(
+            body.heureDebut ?? evaluation.heureDebut,
+            body.heureFin ?? evaluation.heureFin,
+          )
+        : {};
+    await this.verifierConflits({
+      id,
+      classeId: cours.classeId,
+      date:
+        body.date !== undefined
+          ? dateOptionnelle(body.date, 'La date')
+          : evaluation.date,
+      heureDebut: evaluation.heureDebut,
+      heureFin: evaluation.heureFin,
+      ...horaire,
+      salleId:
+        body.salleId !== undefined
+          ? typeof body.salleId === 'string' && body.salleId
+            ? body.salleId
+            : null
+          : evaluation.salleId,
+      surveillant:
+        body.surveillant !== undefined
+          ? texteOptionnel(body.surveillant, 160)
+          : evaluation.surveillant,
+    });
     return this.prisma.evaluation.update({
       where: { id },
       data: {
@@ -188,6 +434,7 @@ export class EvaluationsService {
         ...(body.bareme !== undefined
           ? { bareme: parseNombre(body.bareme, 'Le barème', 1, 100) }
           : {}),
+        ...horaire,
         ...(body.salleId !== undefined
           ? {
               salleId:
@@ -450,13 +697,18 @@ export class EvaluationsService {
     const { evaluation, cours } = await this.evaluationOuverte(id, acteur);
     if (evaluation.statut !== 'OUVERTE')
       throw new ConflictException('Cette évaluation est déjà validée');
-    const [etudiants, notes] = await Promise.all([
+    const [inscrits, dispenses, notes] = await Promise.all([
       this.prisma.inscription.findMany({
         where: { classeId: cours.classeId, statut: { not: 'ABANDONNEE' } },
         include: { personne: true },
       }),
+      this.dispenses(cours),
       this.prisma.note.findMany({ where: { evaluationId: id } }),
     ]);
+    // Qui a déjà acquis l'unité n'a pas de note à recevoir.
+    const etudiants = inscrits.filter(
+      (etudiant) => !dispenses.has(etudiant.personneId),
+    );
     const saisis = new Set(
       notes
         .filter((note) => note.absent || note.valeur !== null)

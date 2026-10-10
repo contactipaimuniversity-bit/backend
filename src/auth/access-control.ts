@@ -4,6 +4,7 @@ export const ACCESS_AREAS = [
   'enrollments',
   'certificates',
   'payments',
+  'payment-cancellation',
   'prospects',
   'people',
   'recruiting',
@@ -78,6 +79,9 @@ export function requiredPermissionForRequest(
     /^\/(demandes-bourse|inscriptions)\/[^/]+\/paiements$/.test(normalizedPath)
   )
     return ['view:payments'];
+  // Annuler un encaissement est un droit à part : encaisser ne suffit pas.
+  if (!isRead && /^\/paiements\/[^/]+\/annulation$/.test(normalizedPath))
+    return ['edit:payment-cancellation'];
   if (
     isRead &&
     /^\/(demandes-bourse|inscriptions)\/[^/]+\/(finance|elements)$/.test(
@@ -128,7 +132,11 @@ export function requiredPermissionForRequest(
     normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
   // Académique : la structure se règle par la scolarité, les séances et les
   // notes par les enseignants, la validation et les délibérations par le jury.
-  if (isRead && normalizedPath === '/academique/filieres')
+  // Filières et niveaux servent aussi aux formulaires d'inscription et de bourse.
+  if (
+    isRead &&
+    ['/academique/filieres', '/academique/niveaux'].includes(normalizedPath)
+  )
     return [
       'view:academics',
       'view:teaching',

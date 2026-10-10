@@ -7,19 +7,25 @@ import {
 } from '@nestjs/common';
 import type { Prisma } from '../../generated/prisma/client';
 import { Acteur } from '../common/acteur';
-import { texteOptionnel, texteRequis } from '../common/saisie';
+import {
+  estDansLeFutur,
+  parseDate,
+  parseNombre,
+  texteOptionnel,
+  texteRequis,
+} from '../common/saisie';
 import { InscriptionsService } from '../inscriptions/inscriptions.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   arrondi,
   classer,
   mention,
-  NIVEAUX,
   resultatAnnuel,
   resultatMatiere,
   resultatSemestre,
   resultatUE,
 } from './academique.rules';
+import { niveauSuivant } from './niveaux';
 import { StructureService } from './structure.service';
 
 type Body = Record<string, unknown>;
@@ -27,6 +33,7 @@ type Body = Record<string, unknown>;
 type Ligne = {
   inscriptionId: string;
   personne: {
+    id: string;
     nom: string;
     prenom: string;
     matricule: string | null;
@@ -41,7 +48,31 @@ type Ligne = {
   detail: Record<string, unknown>;
 };
 
-const DERNIER_NIVEAU = NIVEAUX[NIVEAUX.length - 1];
+type MatiereCredit = {
+  code: string;
+  nom: string;
+  coefficient: number;
+  moyenne: number | null;
+};
+type UniteDetail = {
+  code: string;
+  nom: string;
+  credits: number;
+  moyenne: number | null;
+  validee: boolean;
+  // Année où l'unité a été acquise, quand elle l'était avant cette classe.
+  acquise?: string | null;
+  matieres: MatiereCredit[];
+};
+type Tentative = {
+  date: string;
+  session: string | null;
+  notes: Array<{ code: string; nom: string; note: number }>;
+  moyenne: number | null;
+  validee: boolean;
+  saisiParNom: string;
+  saisiLe: string;
+};
 
 // Résultats d'une classe, délibérations, bulletins et passage en année supérieure.
 @Injectable()
@@ -83,9 +114,14 @@ export class DeliberationsService {
 
   private async calculSemestre(classeId: string, semestre: number) {
     await this.structure.synchroniserCours(classeId);
-    const [regles, etudiants, cours] = await Promise.all([
+    const classe = await this.prisma.classe.findUniqueOrThrow({
+      where: { id: classeId },
+      select: { id: true, filiereId: true, niveau: true },
+    });
+    const [regles, etudiants, acquises, cours] = await Promise.all([
       this.structure.regles(),
       this.etudiants(classeId),
+      this.structure.unitesAcquises(classe),
       this.prisma.cours.findMany({
         where: { classeId, matiere: { actif: true, ue: { semestre } } },
         include: {
@@ -121,7 +157,32 @@ export class DeliberationsService {
     ];
 
     const lignes = etudiants.map((inscription) => {
+      const conservees = acquises.get(inscription.personneId);
       const detailUnites = unites.map((unite) => {
+        // Unité validée une année précédente : le redoublant la garde, sans la repasser.
+        const conservee = conservees?.get(unite.code);
+        if (conservee)
+          return {
+            code: unite.code,
+            nom: unite.nom,
+            credits: unite.credits,
+            moyenne: conservee.moyenne ?? regles.moyenneValidation,
+            validee: true,
+            eliminatoire: false,
+            acquise: conservee.annee,
+            matieres: cours
+              .filter((item) => item.matiere.ueId === unite.id)
+              .map((item) => ({
+                code: item.matiere.code,
+                nom: item.matiere.nom,
+                coefficient: Number(item.matiere.coefficient),
+                controle: null,
+                examen: null,
+                rattrapage: null,
+                moyenne: null,
+                complet: true,
+              })),
+          };
         const matieres = cours
           .filter((item) => item.matiere.ueId === unite.id)
           .map((item) => {
@@ -178,7 +239,7 @@ export class DeliberationsService {
     return { problemes, lignes: classer(lignes) as Ligne[] };
   }
 
-  private async calculAnnuel(classeId: string, niveau: string) {
+  private async calculAnnuel(classeId: string, dernierNiveau: boolean) {
     const [regles, etudiants, actifs, deliberations] = await Promise.all([
       this.structure.regles(),
       this.etudiants(classeId),
@@ -220,11 +281,7 @@ export class DeliberationsService {
               ?.eliminatoire === true,
         };
       });
-      const bilan = resultatAnnuel(
-        semestres,
-        regles,
-        niveau === DERNIER_NIVEAU,
-      );
+      const bilan = resultatAnnuel(semestres, regles, dernierNiveau);
       return {
         inscriptionId: inscription.id,
         personne: inscription.personne,
@@ -332,7 +389,10 @@ export class DeliberationsService {
     }
     const { problemes, lignes } =
       semestre === 0
-        ? await this.calculAnnuel(classeId, classe.niveau)
+        ? await this.calculAnnuel(
+            classeId,
+            await this.structure.finDeCycle(classe),
+          )
         : await this.calculSemestre(classeId, semestre);
     return {
       ...entete,
@@ -367,8 +427,16 @@ export class DeliberationsService {
     );
     const { problemes, lignes } =
       semestre === 0
-        ? await this.calculAnnuel(classeId, classe.niveau)
+        ? await this.calculAnnuel(
+            classeId,
+            await this.structure.finDeCycle(classe),
+          )
         : await this.calculSemestre(classeId, semestre);
+    // À la délibération annuelle, chaque unité devient acquise ou à rattraper.
+    const credits =
+      semestre === 0 && !problemes.length
+        ? await this.creditsAnnuels(classe, lignes)
+        : [];
     // On ne délibère que sur des résultats complets et des notes verrouillées.
     if (problemes.length)
       throw new ConflictException(
@@ -405,8 +473,83 @@ export class DeliberationsService {
           detail: ligne.detail as Prisma.InputJsonObject,
         })),
       });
+      await transaction.creditUE.deleteMany({
+        where: { deliberationId: deliberation.id },
+      });
+      await transaction.creditUE.createMany({
+        data: credits.map((credit) => ({
+          ...credit,
+          deliberationId: deliberation.id,
+        })),
+      });
     });
     return this.resultats(classeId, semestre);
+  }
+
+  // Sort de chaque unité à l'issue de l'année. Acquise : validée, ou compensée
+  // par la moyenne du semestre ou de l'année. À rattraper : non acquise par un
+  // étudiant admis avec dettes. L'ajourné garde ses unités acquises et refait
+  // les autres ; une unité déjà acquise auparavant n'est pas recomptée.
+  private async creditsAnnuels(
+    classe: {
+      id: string;
+      filiereId: string;
+      niveau: string;
+      anneeAcademique: { libelle: string };
+    },
+    lignes: Ligne[],
+  ) {
+    const semestres = await this.prisma.deliberation.findMany({
+      where: {
+        classeId: classe.id,
+        semestre: { in: [1, 2] },
+        statut: 'CLOTUREE',
+      },
+      include: { resultats: true },
+    });
+    const credits: Array<
+      Omit<Prisma.CreditUECreateManyInput, 'deliberationId'>
+    > = [];
+    for (const ligne of lignes) {
+      const anneeAcquise =
+        ligne.creditsTotal > 0 && ligne.creditsAcquis === ligne.creditsTotal;
+      for (const deliberation of semestres) {
+        const resultat = deliberation.resultats.find(
+          (item) => item.inscriptionId === ligne.inscriptionId,
+        );
+        if (!resultat) continue;
+        const semestreAcquis = resultat.creditsAcquis === resultat.creditsTotal;
+        const unites =
+          (resultat.detail as { unites?: UniteDetail[] }).unites ?? [];
+        for (const unite of unites) {
+          if (unite.acquise) continue;
+          const acquise = unite.validee || semestreAcquis || anneeAcquise;
+          if (!acquise && ligne.decision !== 'ADMIS_AVEC_DETTES') continue;
+          credits.push({
+            personneId: ligne.personne.id,
+            inscriptionId: ligne.inscriptionId,
+            filiereId: classe.filiereId,
+            niveau: classe.niveau,
+            annee: classe.anneeAcademique.libelle,
+            semestre: deliberation.semestre,
+            code: unite.code,
+            nom: unite.nom,
+            credits: unite.credits,
+            moyenne: unite.moyenne,
+            statut: acquise ? 'ACQUISE' : 'DETTE',
+            mode: !acquise ? null : unite.validee ? 'VALIDEE' : 'COMPENSEE',
+            matieres: unite.matieres.map((matiere) => ({
+              code: matiere.code,
+              nom: matiere.nom,
+              coefficient: matiere.coefficient,
+              moyenne: matiere.moyenne,
+            })),
+            dateAcquisition: acquise ? new Date() : null,
+          });
+        }
+      }
+    }
+    return credits;
   }
 
   async rouvrir(classeId: string, rawSemestre: string | number, body: Body) {
@@ -429,7 +572,23 @@ export class DeliberationsService {
       throw new ConflictException(
         "La délibération annuelle s'appuie sur ce semestre : rouvrez-la d'abord",
       );
+    // Un rattrapage déjà passé s'appuie sur cette délibération : on ne l'efface pas.
+    const credits = await this.prisma.creditUE.findMany({
+      where: { deliberationId: cible.id },
+      select: { mode: true, tentatives: true },
+    });
+    if (
+      credits.some(
+        (credit) =>
+          credit.mode === 'RATTRAPAGE' ||
+          (credit.tentatives as unknown[]).length > 0,
+      )
+    )
+      throw new ConflictException(
+        "Des crédits issus de cette délibération ont déjà fait l'objet d'un rattrapage : elle ne se rouvre plus",
+      );
     await this.prisma.$transaction([
+      this.prisma.creditUE.deleteMany({ where: { deliberationId: cible.id } }),
       this.prisma.resultatDeliberation.deleteMany({
         where: { deliberationId: cible.id },
       }),
@@ -579,7 +738,7 @@ export class DeliberationsService {
     const classe = await this.structure.classe(classeId);
     const deliberation = await this.prisma.deliberation.findUnique({
       where: { classeId_semestre: { classeId, semestre: 0 } },
-      include: { resultats: true },
+      include: { resultats: true, credits: true },
     });
     if (deliberation?.statut !== 'CLOTUREE')
       throw new ConflictException(
@@ -603,12 +762,18 @@ export class DeliberationsService {
         })
       ).map((item) => item.personneId),
     );
-    const index = NIVEAUX.indexOf(classe.niveau as (typeof NIVEAUX)[number]);
-    return { classe, deliberation, suivante, annee, dejaInscrits, index };
+    // Niveau suivant du cycle ; aucun quand la filière se termine ici.
+    const suivant =
+      niveauSuivant(
+        await this.structure.niveaux(),
+        classe.niveau,
+        classe.filiere.niveauFinal,
+      )?.code ?? null;
+    return { classe, deliberation, suivante, annee, dejaInscrits, suivant };
   }
 
   async passage(classeId: string) {
-    const { classe, deliberation, suivante, annee, dejaInscrits, index } =
+    const { classe, deliberation, suivante, annee, dejaInscrits, suivant } =
       await this.contextePassage(classeId);
     return {
       anneeSuivante: suivante,
@@ -622,17 +787,23 @@ export class DeliberationsService {
           const admis =
             resultat?.decision === 'ADMIS' ||
             resultat?.decision === 'ADMIS_AVEC_DETTES';
+          const credits = deliberation.credits.filter(
+            (credit) => credit.inscriptionId === inscription.id,
+          );
+          const total = (statut: string) =>
+            credits
+              .filter((credit) => credit.statut === statut)
+              .reduce((somme, credit) => somme + credit.credits, 0);
           return {
             inscriptionId: inscription.id,
             personne: inscription.personne,
             decision: resultat?.decision ?? 'NON_DELIBERE',
             // Admis en dernière année : fin de cycle, pas de réinscription.
-            niveauSuivant: !resultat
-              ? null
-              : admis
-                ? (NIVEAUX[index + 1] ?? null)
-                : classe.niveau,
+            niveauSuivant: !resultat ? null : admis ? suivant : classe.niveau,
             dejaInscrit: dejaInscrits.has(inscription.personneId),
+            // Admis avec dettes : crédits à repasser. Ajourné : crédits qu'il garde.
+            creditsARattraper: total('DETTE'),
+            creditsConserves: admis ? 0 : total('ACQUISE'),
           };
         }),
     };
@@ -674,11 +845,257 @@ export class DeliberationsService {
           anneeScolaire: suivante,
           niveau: etudiant.niveauSuivant,
           filiere: classe.filiere.nom,
+          filiereId: classe.filiereId,
         },
         acteur.id,
       );
       creees += 1;
     }
     return { creees, ignorees, anneeSuivante: suivante };
+  }
+
+  // ---------- Crédits à rattraper ----------
+
+  // Unités dues par les étudiants admis avec dettes, et celles déjà rattrapées.
+  async dettes(query: { statut?: string; q?: string }) {
+    const recherche = query.q?.trim();
+    const [credits, filieres, regles] = await Promise.all([
+      this.prisma.creditUE.findMany({
+        where: {
+          ...(query.statut === 'RATTRAPEES'
+            ? { mode: 'RATTRAPAGE' }
+            : query.statut === 'TOUTES'
+              ? { OR: [{ statut: 'DETTE' }, { mode: 'RATTRAPAGE' }] }
+              : { statut: 'DETTE' }),
+          ...(recherche
+            ? {
+                personne: {
+                  OR: [
+                    { nom: { contains: recherche, mode: 'insensitive' } },
+                    { prenom: { contains: recherche, mode: 'insensitive' } },
+                    { matricule: { contains: recherche, mode: 'insensitive' } },
+                  ],
+                },
+              }
+            : {}),
+        },
+        include: {
+          personne: {
+            select: { id: true, nom: true, prenom: true, matricule: true },
+          },
+        },
+        orderBy: [
+          { personne: { nom: 'asc' } },
+          { personne: { prenom: 'asc' } },
+          { semestre: 'asc' },
+          { code: 'asc' },
+        ],
+        take: 500,
+      }),
+      this.prisma.filiere.findMany({ select: { id: true, nom: true } }),
+      this.structure.regles(),
+    ]);
+    const noms = new Map(filieres.map((filiere) => [filiere.id, filiere.nom]));
+    return {
+      moyenneValidation: regles.moyenneValidation,
+      dettes: credits.map((credit) => ({
+        ...credit,
+        moyenne: credit.moyenne === null ? null : Number(credit.moyenne),
+        filiere: noms.get(credit.filiereId) ?? '',
+      })),
+    };
+  }
+
+  // Résultat d'une épreuve de rattrapage : une note par matière repassée. Une
+  // note ne remplace l'ancienne que si elle est meilleure ; l'unité est acquise
+  // dès que sa moyenne atteint le seuil de validation.
+  async rattraper(id: string, body: Body, acteur: Acteur) {
+    const credit = await this.prisma.creditUE.findUnique({ where: { id } });
+    if (!credit) throw new NotFoundException('Unité à rattraper introuvable');
+    if (credit.statut !== 'DETTE')
+      throw new ConflictException('Cette unité est déjà acquise');
+    const date = parseDate(body.date, "La date de l'épreuve");
+    if (estDansLeFutur(date))
+      throw new BadRequestException(
+        "La date de l'épreuve ne peut pas être dans le futur",
+      );
+    const regles = await this.structure.regles();
+    const saisies = Array.isArray(body.notes) ? (body.notes as Body[]) : [];
+    const notes: Tentative['notes'] = [];
+    const matieres = (credit.matieres as MatiereCredit[]).map((matiere) => {
+      const saisie = saisies.find((item) => item?.code === matiere.code);
+      if (
+        saisie?.note === undefined ||
+        saisie.note === null ||
+        saisie.note === ''
+      )
+        return matiere;
+      const note = parseNombre(saisie.note, `La note de ${matiere.nom}`, 0, 20);
+      notes.push({ code: matiere.code, nom: matiere.nom, note });
+      return { ...matiere, moyenne: Math.max(note, matiere.moyenne ?? 0) };
+    });
+    if (!notes.length)
+      throw new BadRequestException(
+        "Saisissez la note d'au moins une matière repassée",
+      );
+    const bilan = resultatUE(matieres, regles);
+    const tentative: Tentative = {
+      date: date.toISOString(),
+      session: texteOptionnel(body.session, 120),
+      notes,
+      moyenne: bilan.moyenne,
+      validee: bilan.validee,
+      saisiParNom: acteur.nom,
+      saisiLe: new Date().toISOString(),
+    };
+    return this.prisma.creditUE.update({
+      where: { id },
+      data: {
+        matieres,
+        moyenne: bilan.moyenne,
+        tentatives: [...(credit.tentatives as Tentative[]), tentative],
+        ...(bilan.validee
+          ? { statut: 'ACQUISE', mode: 'RATTRAPAGE', dateAcquisition: date }
+          : {}),
+      },
+    });
+  }
+
+  // ---------- Relevé annuel, attestation de réussite et diplôme ----------
+
+  // Tout ce que portent les documents de fin d'année d'un étudiant : notes des
+  // deux semestres, résultat annuel, crédits restant dus, et s'il est diplômé.
+  async releve(inscriptionId: string) {
+    const inscription = await this.prisma.inscription.findUnique({
+      where: { id: inscriptionId },
+      include: {
+        personne: true,
+        classe: { include: { filiere: true, anneeAcademique: true } },
+      },
+    });
+    if (!inscription?.classe)
+      throw new NotFoundException("Cet étudiant n'est affecté à aucune classe");
+    const classe = inscription.classe;
+    const deliberations = await this.prisma.deliberation.findMany({
+      where: { classeId: classe.id, statut: 'CLOTUREE' },
+      include: { resultats: true },
+      orderBy: { semestre: 'asc' },
+    });
+    const annuelle = deliberations.find((item) => item.semestre === 0);
+    const annuel = annuelle?.resultats.find(
+      (item) => item.inscriptionId === inscriptionId,
+    );
+    if (!annuelle || !annuel)
+      throw new ConflictException(
+        "Le relevé annuel n'est disponible qu'après clôture de la délibération annuelle",
+      );
+    const retenue = await this.retenue(inscriptionId);
+    if (retenue) throw new ForbiddenException(retenue);
+    const [credits, niveaux, finDeCycle] = await Promise.all([
+      // Toutes les unités de l'étudiant dans la filière, tous niveaux confondus.
+      this.prisma.creditUE.findMany({
+        where: {
+          personneId: inscription.personneId,
+          filiereId: classe.filiereId,
+        },
+        orderBy: [{ niveau: 'asc' }, { semestre: 'asc' }, { code: 'asc' }],
+      }),
+      this.structure.niveaux(),
+      this.structure.finDeCycle(classe),
+    ]);
+    const sort = new Map(
+      credits
+        .filter((credit) => credit.inscriptionId === inscriptionId)
+        .map((credit) => [credit.code, credit]),
+    );
+    const dettes = credits
+      .filter((credit) => credit.statut === 'DETTE')
+      .map((credit) => ({
+        niveau: credit.niveau,
+        annee: credit.annee,
+        code: credit.code,
+        nom: credit.nom,
+        credits: credit.credits,
+      }));
+    return {
+      etudiant: inscription.personne,
+      inscriptionId,
+      classe: {
+        nom: this.structure.nomClasse(classe),
+        niveau: classe.niveau,
+        filiere: classe.filiere.nom,
+        annee: classe.anneeAcademique.libelle,
+      },
+      semestres: deliberations
+        .filter((item) => item.semestre !== 0)
+        .flatMap((deliberation) => {
+          const resultat = deliberation.resultats.find(
+            (item) => item.inscriptionId === inscriptionId,
+          );
+          if (!resultat) return [];
+          const unites =
+            (resultat.detail as { unites?: UniteDetail[] }).unites ?? [];
+          return [
+            {
+              semestre: deliberation.semestre,
+              moyenne:
+                resultat.moyenne === null ? null : Number(resultat.moyenne),
+              creditsAcquis: resultat.creditsAcquis,
+              creditsTotal: resultat.creditsTotal,
+              decision: resultat.decision,
+              unites: unites.map((unite) => ({
+                ...unite,
+                // ACQUISE, DETTE, ou NON_ACQUISE (à refaire en redoublant).
+                statut: unite.acquise
+                  ? 'ACQUISE'
+                  : (sort.get(unite.code)?.statut ?? 'NON_ACQUISE'),
+                mode: unite.acquise
+                  ? 'ANTERIEURE'
+                  : (sort.get(unite.code)?.mode ?? null),
+              })),
+            },
+          ];
+        }),
+      resultat: {
+        moyenne: annuel.moyenne === null ? null : Number(annuel.moyenne),
+        creditsAcquis: annuel.creditsAcquis,
+        creditsTotal: annuel.creditsTotal,
+        rang: annuel.rang,
+        mention: annuel.mention,
+        decision: annuel.decision,
+      },
+      effectif: annuelle.resultats.length,
+      dettes,
+      finDeCycle,
+      diplome:
+        niveaux.find((niveau) => niveau.code === classe.niveau)?.diplome ??
+        null,
+      // Le diplôme suppose l'année finale validée et plus aucun crédit dû.
+      diplomable: finDeCycle && annuel.decision === 'ADMIS' && !dettes.length,
+      absences: await this.absencesDuSemestre(inscriptionId, 0),
+      deliberation: {
+        president: annuelle.president,
+        dateCloture: annuelle.dateCloture,
+      },
+    };
+  }
+
+  // Relevés de toute une classe ; ceux qui sont retenus sont signalés, pas livrés.
+  async releves(classeId: string) {
+    const etudiants = await this.etudiants(classeId);
+    const releves: Array<Record<string, unknown>> = [];
+    for (const inscription of etudiants) {
+      try {
+        releves.push(await this.releve(inscription.id));
+      } catch (error) {
+        if (!(error instanceof ForbiddenException)) throw error;
+        releves.push({
+          inscriptionId: inscription.id,
+          etudiant: inscription.personne,
+          retenu: error.message,
+        });
+      }
+    }
+    return releves;
   }
 }

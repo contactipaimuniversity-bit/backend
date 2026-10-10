@@ -5,6 +5,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  nomUtilisateur,
+  numeroRecu,
+  parseModePaiement,
+} from '../paiements/encaissement';
 import { CreateDemandeBourseDto } from './dto/create-demande-bourse.dto';
 import { SearchDemandesBourseDto } from './dto/search-demandes-bourse.dto';
 import { UpdateDecisionDto } from './dto/update-decision.dto';
@@ -180,6 +185,11 @@ export class DemandesBourseService {
             elementDossierId: element.id,
             montant: preparationPayment.montant,
             typePaiement: preparationPayment.typePaiement,
+            modePaiement: parseModePaiement(
+              createDto.preparation?.modePaiement,
+            ),
+            saisiParNom: await nomUtilisateur(transaction, creeParId),
+            numeroRecu: await numeroRecu(transaction),
             ...(dateSaisie ? { datePaiement: dateSaisie } : {}),
           },
         });

@@ -69,6 +69,8 @@ enum TypePaiement {
   REMBOURSEMENT
   // Trop-perçu déplacé d'une obligation à une autre : une ligne négative et une positive.
   REPORT
+  // Encaissement saisi par erreur : ligne négative qui neutralise le paiement d'origine.
+  ANNULATION
 }
 
 enum StatutCandidaturePersonnel {
@@ -88,15 +90,18 @@ enum StatutElementPersonnel {
 // ---------- MODELES ----------
 
 model Utilisateur {
-  id          String   @id @default(uuid())
-  nom         String
-  prenom      String?
-  email       String   @unique
-  motDePasse  String
-  role        String
-  posteId     String?
-  poste       Poste?   @relation(fields: [posteId], references: [id], onDelete: SetNull)
-  permissions String[] @default([])
+  id            String   @id @default(uuid())
+  nom           String
+  prenom        String?
+  email         String   @unique
+  motDePasse    String
+  role          String
+  posteId       String?
+  poste         Poste?   @relation(fields: [posteId], references: [id], onDelete: SetNull)
+  permissions   String[] @default([])
+  // Photo de profil (facultative), hébergée comme les pièces numérisées.
+  photoUrl      String?
+  photoPublicId String?
 
   personnesCreees   Personne[]
   prospectsRelances ProspectRelance[]
@@ -226,6 +231,8 @@ model Personne {
   // Photo d'identité (facultative), hébergée comme les pièces numérisées.
   photoUrl      String?
   photoPublicId String?
+
+  credits CreditUE[]
 
   // Dernière modification : sert à refuser une modification faite hors ligne sur
   // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
@@ -362,12 +369,19 @@ model Inscription {
   absences  AbsenceEtudiant[]
   notes     Note[]
   resultats ResultatDeliberation[]
+  credits   CreditUE[]
+
+  // Filière du référentiel. Le texte « filiere » reste ce qui a été saisi ;
+  // ce lien fait foi dès qu'il existe (une faute de frappe ne casse plus rien).
+  filiereId  String?
+  filiereRef Filiere? @relation(fields: [filiereId], references: [id], onDelete: SetNull)
 
   // Dernière modification : sert à refuser une modification faite hors ligne sur
   // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
   modifieLe DateTime @default(now()) @updatedAt
 
   @@index([modifieLe])
+  @@index([filiereId])
   @@map("inscriptions")
 }
 
@@ -426,9 +440,18 @@ model Paiement {
   montant          Decimal         @db.Decimal(10, 2)
   datePaiement     DateTime        @default(now())
   typePaiement     TypePaiement
-  // Renseignés pour un remboursement ou un report : la raison et son auteur.
+  // La raison d'un remboursement, d'un report ou d'une annulation.
   motif            String?
+  // Qui a encaissé, remboursé, reporté ou annulé.
   saisiParNom      String?
+  // Espèces, mobile money, virement ou chèque : décide du compte de trésorerie.
+  modePaiement     String?
+  // Numéro de reçu : une suite sans trou par année (RC-2026-000001).
+  numeroRecu       String?         @unique
+  // Sur une ligne d'annulation : le paiement saisi par erreur qu'elle neutralise.
+  annulePaiementId String?         @unique
+  annulePaiement   Paiement?       @relation("AnnulationPaiement", fields: [annulePaiementId], references: [id])
+  annulation       Paiement?       @relation("AnnulationPaiement")
 
   // Heure de réception par le serveur (la date métier peut être celle d'une saisie hors ligne).
   enregistreLe DateTime @default(now())
@@ -751,18 +774,55 @@ model AnneeAcademique {
   statut    String   @default("EN_COURS")
 
   classes Classe[]
+  unites  UniteEnseignement[]
 
   @@map("annees_academiques")
 }
 
-model Filiere {
-  id    String  @id @default(uuid())
-  code  String  @unique
-  nom   String  @unique
-  actif Boolean @default(true)
+// Niveau d'études (L1, L2, L3, M1…). On passe d'un rang au suivant dans le
+// même cycle ; le dernier rang d'un cycle termine le parcours.
+model Niveau {
+  id      String  @id @default(uuid())
+  code    String  @unique
+  libelle String
+  cycle   String  @default("Licence")
+  // Rang dans le cycle : 1 = première année.
+  rang    Int
+  // Diplôme délivré à l'issue de ce niveau, quand il termine un parcours.
+  diplome String?
+  actif   Boolean @default(true)
 
-  classes Classe[]
-  unites  UniteEnseignement[]
+  @@unique([cycle, rang])
+  @@map("niveaux")
+}
+
+// Grand domaine de formation (industriel, management…) qui regroupe des filières.
+model Pole {
+  id          String  @id @default(uuid())
+  nom         String  @unique
+  description String?
+  ordre       Int     @default(0)
+  actif       Boolean @default(true)
+
+  filieres Filiere[]
+
+  @@map("poles")
+}
+
+model Filiere {
+  id          String  @id @default(uuid())
+  code        String  @unique
+  nom         String  @unique
+  actif       Boolean @default(true)
+  poleId      String?
+  pole        Pole?   @relation(fields: [poleId], references: [id], onDelete: SetNull)
+  // Dernier niveau de la filière quand elle s'arrête avant la fin du cycle
+  // (un parcours de technicien supérieur qui finit en L2, par exemple).
+  niveauFinal String?
+
+  classes      Classe[]
+  unites       UniteEnseignement[]
+  inscriptions Inscription[]
 
   @@map("filieres")
 }
@@ -797,20 +857,24 @@ model Classe {
   @@map("classes")
 }
 
+// Une maquette appartient à une année : la modifier ne touche pas les autres années.
 model UniteEnseignement {
-  id        String  @id @default(uuid())
-  filiereId String
-  filiere   Filiere @relation(fields: [filiereId], references: [id])
-  niveau    String
-  semestre  Int
-  code      String
-  nom       String
-  credits   Int
-  ordre     Int     @default(0)
+  id                String           @id @default(uuid())
+  anneeAcademiqueId String?
+  anneeAcademique   AnneeAcademique? @relation(fields: [anneeAcademiqueId], references: [id])
+  filiereId         String
+  filiere           Filiere          @relation(fields: [filiereId], references: [id])
+  niveau            String
+  semestre          Int
+  code              String
+  nom               String
+  credits           Int
+  ordre             Int              @default(0)
 
   matieres Matiere[]
 
-  @@unique([filiereId, niveau, code])
+  @@unique([anneeAcademiqueId, filiereId, niveau, code])
+  @@index([filiereId, niveau])
   @@map("unites_enseignement")
 }
 
@@ -908,6 +972,9 @@ model Evaluation {
   type           String
   libelle        String
   date           DateTime?
+  // Horaire de l'épreuve (HH:MM) : sert au calendrier et au contrôle des conflits.
+  heureDebut     String?
+  heureFin       String?
   bareme         Decimal   @default(20) @db.Decimal(5, 2)
   salleId        String?
   salle          Salle?    @relation(fields: [salleId], references: [id])
@@ -961,9 +1028,45 @@ model Deliberation {
   dateCloture   DateTime?
 
   resultats ResultatDeliberation[]
+  credits   CreditUE[]
 
   @@unique([classeId, semestre])
   @@map("deliberations")
+}
+
+// Unité d'enseignement d'un étudiant à l'issue d'une délibération annuelle :
+// acquise (elle le reste s'il redouble) ou à rattraper (admis avec dettes).
+model CreditUE {
+  id              String       @id @default(uuid())
+  personneId      String
+  personne        Personne     @relation(fields: [personneId], references: [id])
+  // Inscription de l'année où l'unité a été suivie.
+  inscriptionId   String
+  inscription     Inscription  @relation(fields: [inscriptionId], references: [id])
+  deliberationId  String
+  deliberation    Deliberation @relation(fields: [deliberationId], references: [id], onDelete: Cascade)
+  filiereId       String
+  niveau          String
+  annee           String
+  semestre        Int
+  code            String
+  nom             String
+  credits         Int
+  moyenne         Decimal?     @db.Decimal(5, 2)
+  // ACQUISE ou DETTE
+  statut          String
+  // VALIDEE, COMPENSEE ou RATTRAPAGE
+  mode            String?
+  // Matières de l'unité (code, nom, coefficient, moyenne) : base du rattrapage.
+  matieres        Json
+  // Épreuves de rattrapage passées : date, session, notes, moyenne, qui a saisi.
+  tentatives      Json         @default("[]")
+  dateAcquisition DateTime?
+
+  @@unique([deliberationId, inscriptionId, code])
+  @@index([personneId, filiereId, niveau])
+  @@index([statut])
+  @@map("credits_ue")
 }
 
 // Résultat figé à la clôture : il ne change plus, même si la maquette évolue.

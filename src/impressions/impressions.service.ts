@@ -12,6 +12,9 @@ export const TYPES_DOCUMENT = [
   'PV_DELIBERATION',
   'BULLETIN_PAIE',
   'CARTE_ETUDIANT',
+  'RELEVE_NOTES',
+  'ATTESTATION_REUSSITE',
+  'DIPLOME',
 ] as const;
 const MODES = ['IMPRESSION', 'PDF'] as const;
 const DOSSIERS = ['demande-bourse', 'inscription', 'depense'] as const;
