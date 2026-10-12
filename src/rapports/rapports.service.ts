@@ -679,6 +679,14 @@ export class RapportsService {
             : null,
       };
     });
+    // Un dossier créé puis modifié le même jour compte pour un seul élément.
+    const elements = new Map<string, Set<string>>();
+    const trackElement = (categorie: string, key: string) => {
+      if (!elements.has(categorie)) elements.set(categorie, new Set());
+      elements.get(categorie)!.add(key);
+    };
+    for (const event of journal)
+      trackElement(event.ressource, event.entiteId ?? event.id);
     const addCreation = (event: {
       id: string;
       date: Date | string;
@@ -688,6 +696,7 @@ export class RapportsService {
       montant?: string;
     }) => {
       if (loggedCreations.has(event.id)) return;
+      trackElement(event.categorie, event.id);
       activities.push({
         ...event,
         id: `${event.categorie}:${event.id}`,
@@ -760,6 +769,9 @@ export class RapportsService {
       date,
       total: activities.length,
       parCategorie,
+      elementsParCategorie: Object.fromEntries(
+        [...elements].map(([categorie, keys]) => [categorie, keys.size]),
+      ),
       activites: activities,
     };
   }

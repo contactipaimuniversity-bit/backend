@@ -12,9 +12,11 @@ import {
   dateOptionnelle,
   estDansLeFutur,
   meta,
+  minutes,
   pagination,
   parseDate,
   parseEntier,
+  parseHeure,
   parseNombre,
   texteOptionnel,
   texteRequis,
@@ -25,6 +27,8 @@ import {
   congesAcquis,
   joursDeConge,
   MODES_PAIEMENT,
+  PERIODICITES_PAIE,
+  tauxHoraireDuTarif,
   TYPES_CONGE,
   TYPES_CONTRAT,
 } from './rh.rules';
@@ -63,6 +67,25 @@ export class RhService {
         'Les jours ouvrés du mois',
         20,
         31,
+      );
+    if (body.heureArrivee !== undefined)
+      data.heureArrivee = parseHeure(body.heureArrivee, "L'heure d'arrivée");
+    if (body.heureDepart !== undefined)
+      data.heureDepart = parseHeure(body.heureDepart, "L'heure de départ");
+    if (body.toleranceRetard !== undefined)
+      data.toleranceRetard = parseEntier(
+        body.toleranceRetard,
+        'La tolérance de retard',
+        0,
+        120,
+      );
+    if (
+      typeof data.heureArrivee === 'string' &&
+      typeof data.heureDepart === 'string' &&
+      minutes(data.heureDepart) <= minutes(data.heureArrivee)
+    )
+      throw new BadRequestException(
+        "L'heure de départ doit suivre l'heure d'arrivée",
       );
     if (body.categoriePaieId !== undefined) {
       const id =
@@ -278,7 +301,12 @@ export class RhService {
           where: {
             classe: { anneeAcademique: { statut: { not: 'CLOTUREE' } } },
           },
-          include: { matiere: true, classe: { include: { filiere: true } } },
+          include: {
+            matiere: true,
+            classe: { include: { filiere: true } },
+            // Créneaux hebdomadaires : base de l'estimation du salaire mensuel.
+            creneaux: { select: { heureDebut: true, heureFin: true } },
+          },
         },
       },
     });
@@ -338,7 +366,12 @@ export class RhService {
 
   // ---------- Contrats ----------
 
-  async createContrat(employeId: string, body: Body, acteur: Acteur) {
+  async createContrat(
+    employeId: string,
+    body: Body,
+    acteur: Acteur,
+    motifFinPrecedent = 'Remplacé par un nouveau contrat',
+  ) {
     const employe = await this.exiger(employeId);
     if (employe.statut === 'SORTI')
       throw new ConflictException(
@@ -360,13 +393,29 @@ export class RhService {
         'La date de fin doit suivre la date de début',
       );
     const salaireBase = parseNombre(
-      body.salaireBase ?? 0,
+      body.salaireBase || 0,
       'Le salaire de base',
     );
-    const tauxHoraire = parseNombre(body.tauxHoraire ?? 0, 'Le taux horaire');
+    // Tarif négocié « tel montant pour telle durée » ; à défaut, un taux horaire.
+    const tarifMinutes = parseEntier(
+      body.tarifMinutes || 60,
+      'La durée du tarif',
+      15,
+      480,
+    );
+    const tarifMontant = parseNombre(
+      body.tarifMontant || body.tauxHoraire || 0,
+      'Le tarif de la séance',
+    );
+    const tauxHoraire = tauxHoraireDuTarif(tarifMontant, tarifMinutes);
+    const periodicitePaie = choix(
+      body.periodicitePaie ?? 'MENSUEL',
+      PERIODICITES_PAIE,
+      'Le rythme de paiement',
+    );
     if (type === 'VACATION' && tauxHoraire <= 0)
       throw new BadRequestException(
-        'Un contrat de vacation précise le taux horaire',
+        'Un contrat de vacation précise le tarif convenu (montant et durée)',
       );
     if (type !== 'VACATION' && type !== 'STAGE' && salaireBase <= 0)
       throw new BadRequestException(
@@ -387,7 +436,7 @@ export class RhService {
           data: {
             statut: 'TERMINE',
             dateFin: new Date(dateDebut.getTime() - JOUR_MS),
-            motifFin: 'Remplacé par un nouveau contrat',
+            motifFin: motifFinPrecedent,
           },
         });
       }
@@ -399,11 +448,58 @@ export class RhService {
           dateFin,
           salaireBase,
           tauxHoraire,
+          tarifMontant,
+          tarifMinutes,
+          periodicitePaie,
           creeParNom: acteur.nom,
         },
       });
     });
     return this.employe(employeId);
+  }
+
+  // Augmentation (ou révision) : un avenant reprend le contrat en cours avec la
+  // nouvelle rémunération à la date d'effet ; l'ancien reste dans l'historique.
+  async augmenter(id: string, body: Body, acteur: Acteur) {
+    const contrat = await this.prisma.contrat.findUnique({ where: { id } });
+    if (!contrat) throw new NotFoundException('Contrat introuvable');
+    if (contrat.statut !== 'ACTIF')
+      throw new ConflictException('Ce contrat est terminé');
+    const motif = texteRequis(body.motif, "Le motif de l'augmentation", 5, 200);
+    const salaireBase =
+      body.salaireBase === undefined || body.salaireBase === ''
+        ? Number(contrat.salaireBase)
+        : parseNombre(body.salaireBase, 'Le nouveau salaire de base');
+    const tarifMontant =
+      body.tarifMontant === undefined || body.tarifMontant === ''
+        ? Number(contrat.tarifMontant)
+        : parseNombre(body.tarifMontant, 'Le nouveau tarif');
+    const tarifMinutes =
+      body.tarifMinutes === undefined || body.tarifMinutes === ''
+        ? contrat.tarifMinutes
+        : parseEntier(body.tarifMinutes, 'La durée du tarif', 15, 480);
+    if (
+      salaireBase === Number(contrat.salaireBase) &&
+      tauxHoraireDuTarif(tarifMontant, tarifMinutes) ===
+        Number(contrat.tauxHoraire)
+    )
+      throw new BadRequestException(
+        'La rémunération est identique à celle du contrat en cours',
+      );
+    return this.createContrat(
+      contrat.employeId,
+      {
+        type: contrat.type,
+        dateDebut: body.dateEffet,
+        dateFin: contrat.dateFin?.toISOString() ?? null,
+        salaireBase,
+        tarifMontant,
+        tarifMinutes,
+        periodicitePaie: contrat.periodicitePaie,
+      },
+      acteur,
+      `Révision de la rémunération : ${motif}`,
+    );
   }
 
   async terminerContrat(id: string, body: Body) {

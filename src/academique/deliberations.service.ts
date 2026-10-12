@@ -1098,4 +1098,188 @@ export class DeliberationsService {
     }
     return releves;
   }
+
+  // ---------- Parcours d'un étudiant ----------
+
+  // Étudiants (personnes affectées à une classe) par nom, prénom ou matricule.
+  async rechercherEtudiants(q?: string) {
+    const termes = (q ?? '').trim().split(/\s+/).filter(Boolean).slice(0, 4);
+    if (!termes.length) return [];
+    const personnes = await this.prisma.personne.findMany({
+      where: {
+        OR: [
+          { matricule: { not: null } },
+          { inscriptions: { some: { classeId: { not: null } } } },
+        ],
+        // « Prénom Nom » : chaque mot doit se retrouver quelque part.
+        AND: termes.map((terme) => ({
+          OR: [
+            { nom: { contains: terme, mode: 'insensitive' as const } },
+            { prenom: { contains: terme, mode: 'insensitive' as const } },
+            { matricule: { contains: terme, mode: 'insensitive' as const } },
+          ],
+        })),
+      },
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        matricule: true,
+        inscriptions: {
+          where: { classeId: { not: null } },
+          select: {
+            classe: { include: { filiere: true, anneeAcademique: true } },
+          },
+          orderBy: { dateInscription: 'desc' },
+          take: 1,
+        },
+      },
+      orderBy: [{ nom: 'asc' }, { prenom: 'asc' }],
+      take: 8,
+    });
+    return personnes.map(({ inscriptions, ...personne }) => {
+      const classe = inscriptions[0]?.classe;
+      return {
+        ...personne,
+        classe: classe
+          ? {
+              nom: this.structure.nomClasse(classe),
+              annee: classe.anneeAcademique.libelle,
+            }
+          : null,
+      };
+    });
+  }
+
+  // Tout le cursus d'un étudiant : une ligne par année, avec la classe, les
+  // résultats des délibérations clôturées, les absences et les crédits.
+  async parcours(personneId: string) {
+    const personne = await this.prisma.personne.findUnique({
+      where: { id: personneId },
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        matricule: true,
+        sexe: true,
+        telephone: true,
+        dateNaissance: true,
+        lieuNaissance: true,
+      },
+    });
+    if (!personne) throw new NotFoundException('Étudiant introuvable');
+    const [inscriptions, credits] = await Promise.all([
+      this.prisma.inscription.findMany({
+        where: { personneId },
+        include: {
+          classe: { include: { filiere: true, anneeAcademique: true } },
+          resultats: {
+            where: { deliberation: { statut: 'CLOTUREE' } },
+            include: {
+              deliberation: {
+                select: {
+                  semestre: true,
+                  _count: { select: { resultats: true } },
+                },
+              },
+            },
+          },
+        },
+        orderBy: [{ anneeScolaire: 'asc' }, { dateInscription: 'asc' }],
+      }),
+      this.prisma.creditUE.findMany({
+        where: { personneId },
+        orderBy: [{ annee: 'asc' }, { semestre: 'asc' }, { code: 'asc' }],
+      }),
+    ]);
+    const annees = await Promise.all(
+      inscriptions.map(async (inscription) => {
+        const classe = inscription.classe;
+        const sort = new Map(
+          credits
+            .filter((credit) => credit.inscriptionId === inscription.id)
+            .map((credit) => [credit.code, credit]),
+        );
+        const annuel = inscription.resultats.find(
+          (item) => item.deliberation.semestre === 0,
+        );
+        return {
+          inscriptionId: inscription.id,
+          annee: classe?.anneeAcademique.libelle ?? inscription.anneeScolaire,
+          niveau: classe?.niveau ?? inscription.niveau,
+          filiere: classe?.filiere.nom ?? inscription.filiere,
+          statut: inscription.statut,
+          classe: classe
+            ? { id: classe.id, nom: this.structure.nomClasse(classe) }
+            : null,
+          semestres: inscription.resultats
+            .filter((item) => item.deliberation.semestre !== 0)
+            .sort((a, b) => a.deliberation.semestre - b.deliberation.semestre)
+            .map((resultat) => ({
+              semestre: resultat.deliberation.semestre,
+              moyenne:
+                resultat.moyenne === null ? null : Number(resultat.moyenne),
+              creditsAcquis: resultat.creditsAcquis,
+              creditsTotal: resultat.creditsTotal,
+              decision: resultat.decision,
+              unites: (
+                (resultat.detail as { unites?: UniteDetail[] }).unites ?? []
+              ).map((unite) => ({
+                ...unite,
+                // Avant la délibération annuelle, seul le semestre fait foi.
+                statut: unite.acquise
+                  ? 'ACQUISE'
+                  : (sort.get(unite.code)?.statut ??
+                    (unite.validee ? 'ACQUISE' : 'NON_ACQUISE')),
+                mode: unite.acquise
+                  ? 'ANTERIEURE'
+                  : (sort.get(unite.code)?.mode ?? null),
+              })),
+            })),
+          resultat: annuel
+            ? {
+                moyenne:
+                  annuel.moyenne === null ? null : Number(annuel.moyenne),
+                creditsAcquis: annuel.creditsAcquis,
+                creditsTotal: annuel.creditsTotal,
+                rang: annuel.rang,
+                mention: annuel.mention,
+                decision: annuel.decision,
+                effectif: annuel.deliberation._count.resultats,
+              }
+            : null,
+          absences: classe
+            ? await this.absencesDuSemestre(inscription.id, 0)
+            : { total: 0, injustifiees: 0 },
+          // Scolarité impayée : les documents de cette année ne sont pas remis.
+          retenue: classe ? await this.retenue(inscription.id) : null,
+        };
+      }),
+    );
+    // Une unité acquise puis reprise en redoublant ne compte qu'une fois.
+    const acquises = new Map(
+      credits
+        .filter((credit) => credit.statut === 'ACQUISE')
+        .map((credit) => [
+          `${credit.filiereId}:${credit.niveau}:${credit.code}`,
+          credit.credits,
+        ]),
+    );
+    return {
+      etudiant: personne,
+      annees,
+      credits: {
+        acquis: [...acquises.values()].reduce((a, b) => a + b, 0),
+        dettes: credits
+          .filter((credit) => credit.statut === 'DETTE')
+          .map((credit) => ({
+            niveau: credit.niveau,
+            annee: credit.annee,
+            code: credit.code,
+            nom: credit.nom,
+            credits: credit.credits,
+          })),
+      },
+    };
+  }
 }

@@ -12,6 +12,7 @@ import { EvaluationsService } from './evaluations.service';
 import { ScolariteService } from './scolarite.service';
 import { StatistiquesAcademiquesService } from './statistiques.service';
 import { StructureService } from './structure.service';
+import { TableauAcademiqueService } from './tableau.service';
 
 @Module({
   imports: [AuthModule],
@@ -27,6 +28,7 @@ import { StructureService } from './structure.service';
     EvaluationsService,
     DeliberationsService,
     StatistiquesAcademiquesService,
+    TableauAcademiqueService,
     // Les réinscriptions passent par le circuit normal d'inscription.
     InscriptionsService,
   ],

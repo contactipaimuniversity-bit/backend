@@ -21,6 +21,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   bornesDuMois,
   calculerBulletin,
+  echeanceDue,
   joursCommuns,
   joursDeConge,
   MODES_PAIEMENT,
@@ -272,12 +273,47 @@ export class PaieService {
 
   // ---------- Calcul ----------
 
+  // Heures et montant dus pour des séances, chacune au tarif de son contrat.
+  private heuresAPayer(
+    seances: Array<{ id: string; date: Date; dureeMinutes: number }>,
+    contrats: Array<{
+      dateDebut: Date;
+      dateFin: Date | null;
+      tauxHoraire: unknown;
+    }>,
+    actuel: { tauxHoraire: unknown },
+  ) {
+    let minutes = 0;
+    let montant = 0;
+    for (const seance of seances) {
+      const contrat =
+        contrats.find(
+          (item) =>
+            item.dateDebut <= seance.date &&
+            (!item.dateFin || item.dateFin >= seance.date),
+        ) ?? actuel;
+      minutes += seance.dureeMinutes;
+      montant += (seance.dureeMinutes / 60) * Number(contrat.tauxHoraire);
+    }
+    return {
+      heures: Math.round((minutes / 60) * 100) / 100,
+      montant: Math.round(montant),
+      ids: seances.map((seance) => seance.id),
+    };
+  }
+
   private async calculer(periodeId: string) {
     const periode = await this.prisma.periodePaie.findUniqueOrThrow({
       where: { id: periodeId },
       include: { bulletins: true },
     });
     const mois = bornesDuMois(periode.annee, periode.mois);
+    // Les heures retenues par un calcul précédent de cette paie redeviennent à payer.
+    await this.prisma.seanceCours.updateMany({
+      where: { periodePaieId: periodeId },
+      data: { periodePaieId: null },
+    });
+    const avancees = periode.echeancesAvancees as string[];
     const [parametres, rubriques, employes] = await Promise.all([
       this.rh.parametres(),
       this.rubriques(),
@@ -288,12 +324,8 @@ export class PaieService {
         },
         include: {
           rubriques: true,
-          // Contrats qui couvrent au moins un jour du mois.
           contrats: {
-            where: {
-              dateDebut: { lte: mois.fin },
-              OR: [{ dateFin: null }, { dateFin: { gte: mois.debut } }],
-            },
+            where: { dateDebut: { lte: mois.fin } },
             orderBy: { dateDebut: 'desc' },
           },
           absences: {
@@ -310,9 +342,10 @@ export class PaieService {
               dateFin: { gte: mois.debut },
             },
           },
+          // Toutes les heures tenues et pas encore réglées, mois antérieurs compris.
           seances: {
-            where: { date: { gte: mois.debut, lte: mois.fin } },
-            select: { dureeMinutes: true },
+            where: { date: { lte: mois.fin }, periodePaieId: null },
+            select: { id: true, date: true, dureeMinutes: true },
           },
         },
       }),
@@ -321,11 +354,15 @@ export class PaieService {
     const conserves = new Set<string>();
 
     for (const employe of employes) {
-      if (!employe.contrats.length) continue;
+      // Contrats qui couvrent au moins un jour du mois.
+      const contrats = employe.contrats.filter(
+        (item) => !item.dateFin || item.dateFin >= mois.debut,
+      );
+      if (!contrats.length) continue;
       // Salaire au prorata des jours couverts par chaque contrat du mois.
       let salaire = 0;
       let joursCouverts = 0;
-      for (const contrat of employe.contrats) {
+      for (const contrat of contrats) {
         const jours = joursCommuns(
           contrat.dateDebut,
           contrat.dateFin,
@@ -335,19 +372,27 @@ export class PaieService {
         salaire += (Number(contrat.salaireBase) * jours) / mois.jours;
         joursCouverts += jours;
       }
-      const contrat = employe.contrats[0];
-      const tauxHoraire = Number(contrat.tauxHoraire);
-      const heuresVacation =
-        tauxHoraire > 0
-          ? Math.round(
-              (employe.seances.reduce(
-                (total, seance) => total + seance.dureeMinutes,
-                0,
-              ) /
-                60) *
-                100,
-            ) / 100
-          : 0;
+      const contrat = contrats[0];
+      // Les heures ne sont versées qu'à l'échéance du contrat, ou plus tôt si
+      // la RH l'a demandé pour cette paie. Chaque séance est payée au tarif du
+      // contrat en vigueur le jour où elle a été tenue.
+      const du =
+        Number(contrat.tauxHoraire) > 0 &&
+        (echeanceDue(contrat, periode.annee, periode.mois) ||
+          avancees.includes(employe.id));
+      const heures = du
+        ? this.heuresAPayer(employe.seances, employe.contrats, contrat)
+        : { heures: 0, montant: 0, ids: [] };
+      const heuresVacation = heures.heures;
+      const tauxHoraire =
+        heuresVacation > 0
+          ? Math.round((heures.montant / heuresVacation) * 100) / 100
+          : Number(contrat.tauxHoraire);
+      if (heures.ids.length)
+        await this.prisma.seanceCours.updateMany({
+          where: { id: { in: heures.ids } },
+          data: { periodePaieId: periodeId },
+        });
       const joursAbsence =
         employe.absences.reduce(
           (total, absence) => total + Number(absence.jours),
@@ -502,8 +547,58 @@ export class PaieService {
       },
       select: { id: true, nom: true, prenom: true, matricule: true },
     });
+    // Enseignants payés à la séance dont l'échéance ne tombe pas ce mois : leurs
+    // heures s'accumulent, et la RH peut choisir de les verser dans cette paie.
+    const avancees = periode.echeancesAvancees as string[];
+    const aRegler = {
+      date: { lte: mois.fin },
+      OR: [{ periodePaieId: null }, { periodePaieId: id }],
+    };
+    const horaires = await this.prisma.employe.findMany({
+      where: {
+        contrats: { some: { tauxHoraire: { gt: 0 } } },
+        seances: { some: aRegler },
+      },
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        matricule: true,
+        contrats: {
+          where: { dateDebut: { lte: mois.fin } },
+          orderBy: { dateDebut: 'desc' },
+        },
+        seances: {
+          where: aRegler,
+          select: { id: true, date: true, dureeMinutes: true },
+          orderBy: { date: 'asc' },
+        },
+      },
+      orderBy: [{ nom: 'asc' }, { prenom: 'asc' }],
+    });
+    const echeances = horaires.flatMap(({ contrats, seances, ...employe }) => {
+      const contrat = contrats.find(
+        (item) => !item.dateFin || item.dateFin >= mois.debut,
+      );
+      if (!contrat || Number(contrat.tauxHoraire) <= 0) return [];
+      // Échéance normale ce mois : ses heures sont déjà sur son bulletin.
+      if (echeanceDue(contrat, periode.annee, periode.mois)) return [];
+      const du = this.heuresAPayer(seances, contrats, contrat);
+      return [
+        {
+          employe,
+          periodicitePaie: contrat.periodicitePaie,
+          heures: du.heures,
+          montant: du.montant,
+          depuis: seances[0].date,
+          // Versé dans cette paie à la demande de la RH.
+          avancee: avancees.includes(employe.id),
+        },
+      ];
+    });
     return {
       ...periode,
+      echeances,
       totaux: {
         brut: total('brut'),
         retenues: total('totalRetenues'),
@@ -551,6 +646,22 @@ export class PaieService {
     }
     await this.calculer(periode.id);
     return this.periode(periode.id);
+  }
+
+  // Verser dans cette paie les heures d'un enseignant avant son échéance (fin
+  // de semestre, départ, accord particulier), ou revenir sur ce choix.
+  async avancerEcheance(id: string, body: Body) {
+    const periode = await this.ouverte(id);
+    const employeId = texteRequis(body.employeId, "L'enseignant");
+    const avancees = new Set(periode.echeancesAvancees as string[]);
+    if (body.payer === false) avancees.delete(employeId);
+    else avancees.add(employeId);
+    await this.prisma.periodePaie.update({
+      where: { id },
+      data: { echeancesAvancees: [...avancees] },
+    });
+    await this.calculer(id);
+    return this.periode(id);
   }
 
   private async ouverte(id: string) {

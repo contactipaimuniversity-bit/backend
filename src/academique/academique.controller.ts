@@ -19,6 +19,7 @@ import { EvaluationsService } from './evaluations.service';
 import { ScolariteService } from './scolarite.service';
 import { StatistiquesAcademiquesService } from './statistiques.service';
 import { StructureService } from './structure.service';
+import { TableauAcademiqueService } from './tableau.service';
 
 type Body = Record<string, unknown>;
 
@@ -26,7 +27,15 @@ type Body = Record<string, unknown>;
 @Controller('academique')
 @UseGuards(JwtAuthGuard)
 export class AcademiqueController {
-  constructor(private readonly structure: StructureService) {}
+  constructor(
+    private readonly structure: StructureService,
+    private readonly tableau: TableauAcademiqueService,
+  ) {}
+
+  @Get('tableau-de-bord')
+  tableauDeBord() {
+    return this.tableau.aujourdhui();
+  }
 
   @Get('parametres')
   parametres() {
@@ -376,6 +385,20 @@ export class NotesController {
     return this.evaluations.saisirCopies(id, body, acteurDe(request));
   }
 
+  @Get('evaluations/:id/absents')
+  absents(@Param('id') id: string, @Req() request: AuthenticatedRequest) {
+    return this.evaluations.absents(id, acteurDe(request));
+  }
+
+  @Put('evaluations/:id/absents')
+  marquerAbsents(
+    @Param('id') id: string,
+    @Body() body: Body,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.evaluations.marquerAbsents(id, body, acteurDe(request));
+  }
+
   @Get('evaluations/:id/correspondance')
   correspondance(
     @Param('id') id: string,
@@ -430,6 +453,16 @@ export class DeliberationsController {
     @Req() request: AuthenticatedRequest,
   ) {
     return this.deliberations.rattraper(id, body, acteurDe(request));
+  }
+
+  @Get('etudiants')
+  etudiants(@Query('q') q?: string) {
+    return this.deliberations.rechercherEtudiants(q);
+  }
+
+  @Get('etudiants/:personneId/parcours')
+  parcours(@Param('personneId') personneId: string) {
+    return this.deliberations.parcours(personneId);
   }
 
   @Get('releves/:inscriptionId')

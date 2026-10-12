@@ -79,7 +79,11 @@ export class StructureService {
   }
 
   async regles(): Promise<
-    ReglesNotes & { seuilAbsences: number; blocageImpayes: boolean }
+    ReglesNotes & {
+      seuilAbsences: number;
+      blocageImpayes: boolean;
+      anonymatObligatoire: boolean;
+    }
   > {
     const parametres = await this.parametres();
     return {
@@ -94,6 +98,7 @@ export class StructureService {
       creditsPassage: parametres.creditsPassage,
       seuilAbsences: Number(parametres.seuilAbsences),
       blocageImpayes: parametres.blocageImpayes,
+      anonymatObligatoire: parametres.anonymatObligatoire,
     };
   }
 
@@ -137,6 +142,7 @@ export class StructureService {
       'compensationSemestre',
       'compensationAnnuelle',
       'blocageImpayes',
+      'anonymatObligatoire',
     ])
       if (body[key] !== undefined) data[key] = body[key] === true;
     return this.prisma.parametresAcademiques.update({
@@ -167,10 +173,11 @@ export class StructureService {
       throw new BadRequestException(
         'La date de fin doit suivre la date de rentrée',
       );
+    const finSemestre1 = this.finSemestre1(body, dateDebut, dateFin);
     const annee = await this.unique(
       () =>
         this.prisma.anneeAcademique.create({
-          data: { libelle, dateDebut, dateFin },
+          data: { libelle, dateDebut, dateFin, finSemestre1 },
         }),
       'Cette année académique existe déjà',
     );
@@ -197,6 +204,18 @@ export class StructureService {
         reconduites = (await this.reconduire(source.id, annee.id)).unites;
     }
     return { ...annee, maquettesReprises: adoptees.count + reconduites };
+  }
+
+  // Fin du premier semestre : facultative, mais toujours à l'intérieur de l'année.
+  private finSemestre1(body: Body, dateDebut: Date, dateFin: Date) {
+    if (typeof body.finSemestre1 !== 'string' || !body.finSemestre1.trim())
+      return null;
+    const date = parseDate(body.finSemestre1, 'La fin du premier semestre');
+    if (date <= dateDebut || date >= dateFin)
+      throw new BadRequestException(
+        "La fin du premier semestre doit se situer entre la rentrée et la fin de l'année",
+      );
+    return date;
   }
 
   // Année de travail par défaut : celle qui couvre la date du jour, sinon la plus récente.
@@ -230,6 +249,12 @@ export class StructureService {
       data.dateDebut = parseDate(body.dateDebut, 'La date de rentrée');
     if (body.dateFin !== undefined)
       data.dateFin = parseDate(body.dateFin, "La date de fin d'année");
+    if (body.finSemestre1 !== undefined)
+      data.finSemestre1 = this.finSemestre1(
+        body,
+        (data.dateDebut as Date | undefined) ?? annee.dateDebut,
+        (data.dateFin as Date | undefined) ?? annee.dateFin,
+      );
     if (body.statut !== undefined) {
       const statut = choix(body.statut, STATUTS_ANNEE, 'Le statut');
       if (statut === 'CLOTUREE' && annee.statut !== 'CLOTUREE') {

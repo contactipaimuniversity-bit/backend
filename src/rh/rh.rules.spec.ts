@@ -2,10 +2,12 @@ import {
   bornesDuMois,
   calculerBulletin,
   congesAcquis,
+  echeanceDue,
   EntreePaie,
   joursCommuns,
   joursDeConge,
   RubriqueCalcul,
+  tauxHoraireDuTarif,
 } from './rh.rules';
 
 const jour = (texte: string) => new Date(`${texte}T00:00:00Z`);
@@ -127,5 +129,44 @@ describe('règles RH et paie', () => {
     );
     expect(bulletin).toMatchObject({ brut: 62_500, net: 62_500 });
     expect(bulletin.lignes[0]).toMatchObject({ code: 'VACATION', base: 12.5 });
+  });
+});
+
+describe('tarif négocié et échéance de paiement', () => {
+  it('convertit un tarif à la séance en taux horaire', () => {
+    expect(tauxHoraireDuTarif(2000, 60)).toBe(2000);
+    expect(tauxHoraireDuTarif(2400, 90)).toBe(1600);
+    expect(tauxHoraireDuTarif(2000, 120)).toBe(1000);
+  });
+
+  const contrat = (periodicitePaie: string, dateFin: Date | null = null) => ({
+    periodicitePaie,
+    dateDebut: jour('2026-10-05'),
+    dateFin,
+  });
+
+  it('verse chaque mois un contrat mensuel', () => {
+    expect(echeanceDue(contrat('MENSUEL'), 2026, 10)).toBe(true);
+    expect(echeanceDue(contrat('MENSUEL'), 2026, 11)).toBe(true);
+  });
+
+  it('compte le rythme depuis le début du contrat', () => {
+    expect(echeanceDue(contrat('BIMESTRIEL'), 2026, 10)).toBe(false);
+    expect(echeanceDue(contrat('BIMESTRIEL'), 2026, 11)).toBe(true);
+    expect(echeanceDue(contrat('TRIMESTRIEL'), 2026, 11)).toBe(false);
+    expect(echeanceDue(contrat('TRIMESTRIEL'), 2026, 12)).toBe(true);
+    expect(echeanceDue(contrat('TRIMESTRIEL'), 2027, 3)).toBe(true);
+    expect(echeanceDue(contrat('TRIMESTRIEL'), 2027, 2)).toBe(false);
+  });
+
+  it('ne verse jamais seul un contrat payé par semestre', () => {
+    for (let mois = 1; mois <= 12; mois += 1)
+      expect(echeanceDue(contrat('SEMESTRIEL'), 2027, mois)).toBe(false);
+  });
+
+  it('solde le compte le dernier mois du contrat', () => {
+    const termine = contrat('SEMESTRIEL', jour('2026-11-20'));
+    expect(echeanceDue(termine, 2026, 11)).toBe(true);
+    expect(echeanceDue(termine, 2026, 10)).toBe(false);
   });
 });

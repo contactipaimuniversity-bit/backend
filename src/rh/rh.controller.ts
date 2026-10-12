@@ -88,6 +88,15 @@ export class RhController {
     return this.rh.createContrat(id, body, acteurDe(request));
   }
 
+  @Post('contrats/:id/augmentation')
+  augmenter(
+    @Param('id') id: string,
+    @Body() body: Body,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.rh.augmenter(id, body, acteurDe(request));
+  }
+
   @Post('contrats/:id/fin')
   terminerContrat(@Param('id') id: string, @Body() body: Body) {
     return this.rh.terminerContrat(id, body);
@@ -199,6 +208,11 @@ export class PaieController {
     @Req() request: AuthenticatedRequest,
   ) {
     return this.paie.payer(id, body, acteurDe(request));
+  }
+
+  @Post('periodes/:id/echeances')
+  avancerEcheance(@Param('id') id: string, @Body() body: Body) {
+    return this.paie.avancerEcheance(id, body);
   }
 
   @Patch('bulletins/:id')

@@ -25,6 +25,10 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
   const maintenant = new Date();
   const annee = maintenant.getUTCFullYear();
   const jour = maintenant.toISOString().slice(0, 10);
+  // Une séance s'émarge sur un créneau du même jour de la semaine ; le
+  // dimanche, hors emploi du temps, elle passe comme séance exceptionnelle.
+  const jourSemaine = maintenant.getUTCDay() || 1;
+  const horsCreneau = maintenant.getUTCDay() === 0;
   const debutMois = `${jour.slice(0, 8)}01`;
   const libelleAnnee = `${annee}-${annee + 1}`;
 
@@ -409,7 +413,7 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     const creneau = (code: string, heureDebut: string, heureFin: string) =>
       api('scolarite').post('/academique/creneaux', {
         coursId: ids[code],
-        jour: 1,
+        jour: jourSemaine,
         heureDebut,
         heureFin,
         salleId: salle.body.id,
@@ -434,6 +438,7 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
         dureeMinutes: 120,
         contenu: 'Chapitre 1 : ensembles et applications',
         absents: [{ inscriptionId: ids.c }],
+        horsCreneau,
       });
     const demain = new Date(maintenant.getTime() + 2 * 86_400_000)
       .toISOString()
@@ -645,6 +650,93 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     const numeroDeC = table.body.lignes.find(
       (ligne: Body) => ligne.nom === 'Compaore',
     ).numero;
+    // Chaque étudiant a son code de fiche, propre à l'épreuve ; le correcteur
+    // voit les codes, jamais la table qui les relie aux noms.
+    const codes = table.body.lignes.map((ligne: Body) => ligne.code);
+    expect(new Set(codes).size).toBe(3);
+    // La scolarité note les absents par leur nom ; le correcteur voit « copie
+    // absente » en face du code, sans savoir de qui il s'agit.
+    await api('prof')
+      .put(`/notes/evaluations/${anonyme}/absents`, { inscriptionIds: [ids.c] })
+      .expect(403);
+    const appel = await api('scolarite')
+      .put(`/notes/evaluations/${anonyme}/absents`, { inscriptionIds: [ids.c] })
+      .expect(200);
+    expect(
+      appel.body.etudiants.filter((etudiant: Body) => etudiant.absent),
+    ).toHaveLength(1);
+    const codeDeC = table.body.lignes.find(
+      (ligne: Body) => ligne.nom === 'Compaore',
+    ).code;
+    const apresAppel = await api('scolarite').get(
+      `/notes/evaluations/${anonyme}/copies`,
+    );
+    expect(
+      apresAppel.body.copies.find((copie: Body) => copie.code === codeDeC)
+        .absent,
+    ).toBe(true);
+    await api('scolarite')
+      .put(`/notes/evaluations/${anonyme}/absents`, { inscriptionIds: [] })
+      .expect(200);
+    // Tableau de bord du jour : cours prévus et évaluations en attente.
+    const tableau = await api('scolarite')
+      .get('/academique/tableau-de-bord')
+      .expect(200);
+    expect(tableau.body.cours.total).toBe(tableau.body.cours.lignes.length);
+    expect(Array.isArray(tableau.body.evaluations.aValider)).toBe(true);
+    // La fin du premier semestre se situe à l'intérieur de l'année.
+    await api('scolarite')
+      .patch(`/academique/annees/${ids.annee}`, {
+        finSemestre1: `${annee + 2}-01-01`,
+      })
+      .expect(400);
+    for (const code of codes) expect(code).toMatch(/^IPAIM-\d{3}[A-HJ-NPR-Z]$/);
+    expect(copies.body.copies.map((copie: Body) => copie.code).sort()).toEqual(
+      [...codes].sort(),
+    );
+    await api('prof')
+      .get(`/notes/evaluations/${anonyme}/correspondance`)
+      .expect(403);
+    const codeDeA = table.body.lignes.find(
+      (ligne: Body) => ligne.nom !== 'Compaore',
+    ).code;
+    await api('scolarite')
+      .put(`/notes/evaluations/${anonyme}/copies`, {
+        notes: [{ code: 'IPAIM-000I', valeur: 10 }],
+      })
+      .expect(400);
+    const parCode = await api('scolarite')
+      .put(`/notes/evaluations/${anonyme}/copies`, {
+        notes: [{ code: codeDeA.toLowerCase(), valeur: 11 }],
+      })
+      .expect(200);
+    expect(
+      parCode.body.copies.find((copie: Body) => copie.code === codeDeA).valeur,
+    ).toBe(11);
+    await api('scolarite')
+      .put(`/notes/evaluations/${anonyme}/copies`, {
+        notes: [{ code: codeDeA, valeur: null }],
+      })
+      .expect(200);
+    // Anonymat obligatoire : plus aucune note ne se saisit au nom d'un étudiant.
+    await api('scolarite')
+      .patch('/academique/parametres', { anonymatObligatoire: true })
+      .expect(200);
+    const nominatif = await evaluation('scolarite', 'PROJ', 'CONTROLE');
+    const refusNominatif = await noter(
+      'scolarite',
+      nominatif,
+      10,
+      10,
+      10,
+    ).expect(409);
+    expect(refusNominatif.body.message).toMatch(/anonymat est obligatoire/);
+    await api('scolarite')
+      .patch('/academique/parametres', { anonymatObligatoire: false })
+      .expect(200);
+    await api('scolarite')
+      .delete(`/notes/evaluations/${nominatif}`)
+      .expect(200);
     await api('scolarite')
       .put(`/notes/evaluations/${anonyme}/copies`, {
         notes: [{ numero: 999, valeur: 10 }],
@@ -1159,6 +1251,7 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
         heureDebut: '10:00',
         dureeMinutes: 120,
         contenu: 'Introduction aux algorithmes',
+        horsCreneau,
       })
       .expect(409);
     await api('rh')
@@ -1377,6 +1470,201 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       })
       .expect(200);
     expect(retrait.body).toHaveLength(0);
+  });
+
+  // ---------- Présences du personnel et paie à l'échéance ----------
+
+  it('émarge sur le créneau, paie les heures à l’échéance et pointe le personnel', async () => {
+    // Le mois précédent, pour une paie encore libre.
+    const precedent = new Date(
+      Date.UTC(maintenant.getUTCFullYear(), maintenant.getUTCMonth() - 1, 15),
+    );
+    if (precedent.getUTCFullYear() !== annee) return;
+    if (precedent.getUTCDay() === 0) precedent.setUTCDate(16);
+    const mois = precedent.getUTCMonth() + 1;
+    const date = precedent.toISOString().slice(0, 10);
+    const debutMois = `${date.slice(0, 8)}01`;
+
+    // Tarif négocié : 2 400 F pour 1 h 30, payé tous les trois mois.
+    const vacataire = await api('rh')
+      .post('/rh/employes', {
+        nom: 'Tarif',
+        prenom: 'Negocie',
+        categorie: 'ENSEIGNANT_VACATAIRE',
+        fonction: "Enseignant d'anglais",
+        dateEmbauche: '2020-01-01',
+      })
+      .expect(201);
+    const contrat = await api('rh')
+      .post(`/rh/employes/${vacataire.body.id}/contrats`, {
+        type: 'VACATION',
+        dateDebut: debutMois,
+        tarifMontant: 2400,
+        tarifMinutes: 90,
+        periodicitePaie: 'TRIMESTRIEL',
+      })
+      .expect(201);
+    expect(contrat.body.contrats[0]).toMatchObject({
+      tauxHoraire: '1600',
+      tarifMontant: '2400',
+      tarifMinutes: 90,
+      periodicitePaie: 'TRIMESTRIEL',
+    });
+    await api('scolarite')
+      .patch(`/academique/cours/${ids.ANG}`, {
+        enseignantId: vacataire.body.id,
+      })
+      .expect(200);
+    const creneau = await api('scolarite')
+      .post('/academique/creneaux', {
+        coursId: ids.ANG,
+        jour: precedent.getUTCDay(),
+        heureDebut: '14:00',
+        heureFin: '15:30',
+      })
+      .expect(201);
+
+    // Une séance ne s'émarge pas en dehors de son créneau.
+    const seance = (heureDebut: string, extra: Body = {}) =>
+      api('scolarite').post('/scolarite/seances', {
+        coursId: ids.ANG,
+        date,
+        heureDebut,
+        dureeMinutes: 90,
+        contenu: 'Unit 1 : introductions',
+        ...extra,
+      });
+    const refus = await seance('13:00').expect(400);
+    expect(refus.body.message).toMatch(/pas de créneau/);
+
+    // Émargement par la scolarité, sur le créneau du jour uniquement.
+    const feuille = await api('scolarite').get(
+      `/rh/pointage/enseignants?date=${date}`,
+    );
+    const ligne = (corps: Body) =>
+      corps.lignes.find((item: Body) => item.creneauId === creneau.body.id);
+    expect(ligne(feuille.body).etat).toBe('A_POINTER');
+    const lendemain = new Date(precedent.getTime() + 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    await api('scolarite')
+      .post('/rh/pointage/enseignants/presence', {
+        creneauId: creneau.body.id,
+        date: lendemain,
+      })
+      .expect(400);
+    const absent = await api('scolarite')
+      .post('/rh/pointage/enseignants/absence', {
+        creneauId: creneau.body.id,
+        date,
+      })
+      .expect(201);
+    expect(ligne(absent.body).etat).toBe('ABSENT');
+    const present = await api('scolarite')
+      .post('/rh/pointage/enseignants/presence', {
+        creneauId: creneau.body.id,
+        date,
+      })
+      .expect(201);
+    expect(ligne(present.body)).toMatchObject({
+      etat: 'PRESENT',
+      absence: null,
+      seance: { dureeMinutes: 90, cahierRempli: false },
+    });
+    await api('scolarite')
+      .post('/rh/pointage/enseignants/absence', {
+        creneauId: creneau.body.id,
+        date,
+      })
+      .expect(409);
+    // La déclaration complète la séance émargée, sans la doubler.
+    await seance('14:00').expect(201);
+    const complete = await api('scolarite').get(
+      `/rh/pointage/enseignants?date=${date}`,
+    );
+    expect(ligne(complete.body).seance.cahierRempli).toBe(true);
+    await seance('14:00').expect(409);
+
+    // Paie du mois : l'échéance trimestrielle n'est pas tombée.
+    const periode = await api('paie')
+      .post('/paie/periodes', { annee, mois })
+      .expect(201);
+    const bulletin = (corps: Body) =>
+      corps.bulletins.find(
+        (item: Body) => item.employeId === vacataire.body.id,
+      );
+    expect(bulletin(periode.body)).toBeUndefined();
+    expect(
+      periode.body.echeances.find(
+        (item: Body) => item.employe.id === vacataire.body.id,
+      ),
+    ).toMatchObject({
+      periodicitePaie: 'TRIMESTRIEL',
+      heures: 1.5,
+      montant: 2400,
+      avancee: false,
+    });
+    // La RH décide de verser ces heures dans cette paie, puis se ravise.
+    const avancee = await api('paie')
+      .post(`/paie/periodes/${periode.body.id}/echeances`, {
+        employeId: vacataire.body.id,
+      })
+      .expect(201);
+    expect(bulletin(avancee.body)).toMatchObject({
+      heuresVacation: '1.5',
+      tauxHoraire: '1600',
+      brut: '2400',
+    });
+    const remise = await api('paie')
+      .post(`/paie/periodes/${periode.body.id}/echeances`, {
+        employeId: vacataire.body.id,
+        payer: false,
+      })
+      .expect(201);
+    expect(bulletin(remise.body)).toBeUndefined();
+
+    // Pointage d'un administratif : retard au-delà de la tolérance.
+    const pointage = await api('rh')
+      .put(`/rh/pointage/personnel/${ids.secretaire}`, {
+        date,
+        heureArrivee: '08:30',
+        heureDepart: '15:00',
+      })
+      .expect(200);
+    expect(
+      pointage.body.lignes.find(
+        (item: Body) => item.employe.id === ids.secretaire,
+      ),
+    ).toMatchObject({
+      etat: 'PRESENT',
+      retardMinutes: 30,
+      departAnticipeMinutes: 60,
+    });
+    // Un enseignant émarge par créneau, pas à la journée.
+    await api('rh')
+      .put(`/rh/pointage/personnel/${vacataire.body.id}`, {
+        date,
+        heureArrivee: '08:00',
+      })
+      .expect(400);
+
+    // Augmentation : un avenant, l'ancien salaire reste dans l'historique.
+    const fiche = await api('rh').get(`/rh/employes/${ids.secretaire}`);
+    const actif = fiche.body.contrats.find(
+      (item: Body) => item.statut === 'ACTIF',
+    );
+    const augmente = await api('rh')
+      .post(`/rh/contrats/${actif.id}/augmentation`, {
+        dateEffet: jour,
+        salaireBase: 300000,
+        motif: 'Ancienneté',
+      })
+      .expect(201);
+    expect(augmente.body.contrats[0]).toMatchObject({
+      statut: 'ACTIF',
+      salaireBase: '300000',
+    });
+    expect(augmente.body.contrats[1].motifFin).toMatch(/Révision/);
   });
 
   it('clôture l’année académique et la rend définitive', async () => {

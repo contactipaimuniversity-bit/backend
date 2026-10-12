@@ -761,17 +761,21 @@ model ParametresAcademiques {
   seuilAbsences        Decimal  @default(30) @db.Decimal(5, 2)
   // Bulletins et relevés retenus tant que la scolarité n'est pas soldée.
   blocageImpayes       Boolean  @default(false)
+  // Toute évaluation se corrige sous anonymat : aucune note ne se saisit au nom d'un étudiant.
+  anonymatObligatoire  Boolean  @default(false)
 
   @@map("parametres_academiques")
 }
 
 model AnneeAcademique {
-  id        String   @id @default(uuid())
+  id           String    @id @default(uuid())
   // Même libellé que l'année scolaire des inscriptions (ex. 2026-2027).
-  libelle   String   @unique
-  dateDebut DateTime
-  dateFin   DateTime
-  statut    String   @default("EN_COURS")
+  libelle      String    @unique
+  dateDebut    DateTime
+  dateFin      DateTime
+  // Dernier jour du premier semestre ; le second court ensuite jusqu'à la fin de l'année.
+  finSemestre1 DateTime?
+  statut       String    @default("EN_COURS")
 
   classes Classe[]
   unites  UniteEnseignement[]
@@ -904,9 +908,10 @@ model Cours {
   enseignantId String?
   enseignant   Employe? @relation(fields: [enseignantId], references: [id])
 
-  creneaux    Creneau[]
-  seances     SeanceCours[]
-  evaluations Evaluation[]
+  creneaux           Creneau[]
+  seances            SeanceCours[]
+  evaluations        Evaluation[]
+  absencesEnseignant AbsenceEnseignant[]
 
   @@unique([classeId, matiereId])
   @@map("cours")
@@ -930,24 +935,49 @@ model Creneau {
 
 // Séance réellement tenue : appel et cahier de textes. Sert aussi à la paie des vacataires.
 model SeanceCours {
-  id           String   @id @default(uuid())
-  coursId      String
-  cours        Cours    @relation(fields: [coursId], references: [id])
-  date         DateTime
-  heureDebut   String
-  dureeMinutes Int
-  contenu      String
-  enseignantId String?
-  enseignant   Employe? @relation(fields: [enseignantId], references: [id])
-  saisieParId  String
-  saisieParNom String
-  dateSaisie   DateTime @default(now())
+  id            String   @id @default(uuid())
+  coursId       String
+  cours         Cours    @relation(fields: [coursId], references: [id])
+  date          DateTime
+  heureDebut    String
+  dureeMinutes  Int
+  contenu       String
+  enseignantId  String?
+  enseignant    Employe? @relation(fields: [enseignantId], references: [id])
+  saisieParId   String
+  saisieParNom  String
+  dateSaisie    DateTime @default(now())
+  // Séance exceptionnelle (rattrapage) tenue en dehors de l'emploi du temps.
+  horsCreneau   Boolean  @default(false)
+  // Paie qui a réglé ces heures ; vide tant qu'elles restent à payer.
+  periodePaieId String?
 
   absences AbsenceEtudiant[]
 
   @@index([coursId, date])
   @@index([enseignantId, date])
+  @@index([periodePaieId])
   @@map("seances_cours")
+}
+
+// Créneau de l'emploi du temps où l'enseignant ne s'est pas présenté.
+model AbsenceEnseignant {
+  id           String   @id @default(uuid())
+  coursId      String
+  cours        Cours    @relation(fields: [coursId], references: [id], onDelete: Cascade)
+  enseignantId String
+  enseignant   Employe  @relation(fields: [enseignantId], references: [id])
+  date         DateTime
+  heureDebut   String
+  dureeMinutes Int
+  justifiee    Boolean  @default(false)
+  motif        String?
+  saisieParNom String
+  dateSaisie   DateTime @default(now())
+
+  @@unique([coursId, date, heureDebut])
+  @@index([enseignantId, date])
+  @@map("absences_enseignants")
 }
 
 model AbsenceEtudiant {
@@ -986,6 +1016,8 @@ model Evaluation {
   dateValidation DateTime?
   // Copies corrigées sous numéro d'anonymat jusqu'à la validation.
   anonyme        Boolean   @default(false)
+  // Date de la première validation : les noms ont alors été révélés.
+  anonymatLeveLe DateTime?
   creeParNom     String
 
   notes Note[]
@@ -1003,10 +1035,14 @@ model Note {
   valeur         Decimal?    @db.Decimal(5, 2)
   absent         Boolean     @default(false)
   numeroAnonymat Int?
+  // Code de la fiche d'anonymat (IPAIM-785B), propre à cette évaluation ;
+  // effacé quand il n'a plus cours, il peut alors resservir.
+  codeAnonymat   String?
   saisieParNom   String
   dateSaisie     DateTime    @default(now())
 
   @@unique([evaluationId, inscriptionId])
+  @@unique([evaluationId, codeAnonymat])
   @@index([inscriptionId])
   @@map("notes")
 }
@@ -1098,6 +1134,10 @@ model ParametresRH {
   joursOuvresMois  Int     @default(26)
   // Catégorie budgétaire sur laquelle la paie est imputée.
   categoriePaieId  String?
+  // Horaires attendus du personnel administratif : base du calcul des retards.
+  heureArrivee     String  @default("08:00")
+  heureDepart      String  @default("16:00")
+  toleranceRetard  Int     @default(10)
 
   @@map("parametres_rh")
 }
@@ -1128,32 +1168,41 @@ model Employe {
   candidatureId       String?   @unique
   utilisateurId       String?   @unique
 
-  contrats  Contrat[]
-  conges    Conge[]
-  absences  AbsencePersonnel[]
-  rubriques EmployeRubrique[]
-  bulletins BulletinPaie[]
-  cours     Cours[]
-  seances   SeanceCours[]
+  contrats      Contrat[]
+  conges        Conge[]
+  absences      AbsencePersonnel[]
+  rubriques     EmployeRubrique[]
+  bulletins     BulletinPaie[]
+  cours         Cours[]
+  seances       SeanceCours[]
+  pointages     PointagePersonnel[]
+  absencesCours AbsenceEnseignant[]
 
   @@map("employes")
 }
 
 model Contrat {
-  id           String    @id @default(uuid())
-  employeId    String
-  employe      Employe   @relation(fields: [employeId], references: [id])
+  id              String    @id @default(uuid())
+  employeId       String
+  employe         Employe   @relation(fields: [employeId], references: [id])
   // CDI, CDD, VACATION ou STAGE
-  type         String
-  dateDebut    DateTime
-  dateFin      DateTime?
-  salaireBase  Decimal   @default(0) @db.Decimal(12, 2)
-  tauxHoraire  Decimal   @default(0) @db.Decimal(12, 2)
+  type            String
+  dateDebut       DateTime
+  dateFin         DateTime?
+  salaireBase     Decimal   @default(0) @db.Decimal(12, 2)
+  tauxHoraire     Decimal   @default(0) @db.Decimal(12, 2)
+  // Tarif négocié de l'enseignant payé à la séance : tel montant pour telle
+  // durée (2 400 F pour 90 minutes). Le taux horaire en découle.
+  tarifMontant    Decimal   @default(0) @db.Decimal(12, 2)
+  tarifMinutes    Int       @default(60)
+  // Rythme de paiement des heures : MENSUEL, BIMESTRIEL, TRIMESTRIEL ou
+  // SEMESTRIEL (versé quand la RH le déclenche, en fin de semestre).
+  periodicitePaie String    @default("MENSUEL")
   // ACTIF ou TERMINE
-  statut       String    @default("ACTIF")
-  motifFin     String?
-  creeParNom   String
-  dateCreation DateTime  @default(now())
+  statut          String    @default("ACTIF")
+  motifFin        String?
+  creeParNom      String
+  dateCreation    DateTime  @default(now())
 
   @@index([employeId])
   @@map("contrats")
@@ -1198,6 +1247,23 @@ model AbsencePersonnel {
   @@map("absences_personnel")
 }
 
+// Heure d'arrivée et de départ d'un employé administratif ou technique, un jour donné.
+model PointagePersonnel {
+  id           String   @id @default(uuid())
+  employeId    String
+  employe      Employe  @relation(fields: [employeId], references: [id])
+  date         DateTime
+  heureArrivee String?
+  heureDepart  String?
+  observation  String?
+  saisieParNom String
+  dateSaisie   DateTime @default(now())
+
+  @@unique([employeId, date])
+  @@index([date])
+  @@map("pointages_personnel")
+}
+
 // ---------- PAIE ----------
 
 model RubriquePaie {
@@ -1235,21 +1301,23 @@ model EmployeRubrique {
 }
 
 model PeriodePaie {
-  id             String    @id @default(uuid())
-  annee          Int
-  mois           Int
+  id                String    @id @default(uuid())
+  annee             Int
+  mois              Int
   // OUVERTE, VALIDEE ou PAYEE
-  statut         String    @default("OUVERTE")
-  prepareParId   String
-  prepareParNom  String
-  dateCreation   DateTime  @default(now())
-  valideParId    String?
-  valideParNom   String?
-  dateValidation DateTime?
-  payeParId      String?
-  payeParNom     String?
-  datePaiement   DateTime?
-  modePaiement   String?
+  statut            String    @default("OUVERTE")
+  prepareParId      String
+  prepareParNom     String
+  dateCreation      DateTime  @default(now())
+  valideParId       String?
+  valideParNom      String?
+  dateValidation    DateTime?
+  payeParId         String?
+  payeParNom        String?
+  datePaiement      DateTime?
+  modePaiement      String?
+  // Enseignants payés dans cette paie avant leur échéance : [employeId].
+  echeancesAvancees Json      @default("[]")
 
   bulletins BulletinPaie[]
 

@@ -78,6 +78,7 @@ export class PersonnesService {
         { prenom: { contains: query, mode: 'insensitive' } },
         { telephone: { contains: query, mode: 'insensitive' } },
         { quartier: { contains: query, mode: 'insensitive' } },
+        { matricule: { contains: query, mode: 'insensitive' } },
       ];
     }
     if (telephone) {

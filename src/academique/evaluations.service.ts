@@ -16,6 +16,7 @@ import {
   texteOptionnel,
   texteRequis,
 } from '../common/saisie';
+import { randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   chevauche,
@@ -38,6 +39,14 @@ type Epreuve = {
 };
 
 const jourDe = (date: Date) => date.toISOString().slice(0, 10);
+
+// Code d'une fiche d'anonymat : trois chiffres et une lettre, sans I, O ni Q
+// (trop proches de 1 et 0 à la lecture d'une copie).
+const LETTRES_CODE = 'ABCDEFGHJKLMNPRSTUVWXYZ';
+const tirerCode = () =>
+  `IPAIM-${String(randomInt(1000)).padStart(3, '0')}${LETTRES_CODE[randomInt(LETTRES_CODE.length)]}`;
+// Un code n'a plus cours six mois après la validation de son épreuve.
+const CONSERVATION_CODES_JOURS = 180;
 
 // Évaluations d'un cours et saisie des notes, jusqu'à leur verrouillage.
 @Injectable()
@@ -101,6 +110,11 @@ export class EvaluationsService {
       // Lecture seule une fois le semestre délibéré ou l'année clôturée.
       verrouille: clos || cours.classe.anneeAcademique.statut === 'CLOTUREE',
       peutValider: peut(acteur, 'edit:deliberations'),
+      // Le correcteur n'approche ni les fiches ni la table d'anonymat.
+      gereAnonymat:
+        peut(acteur, 'edit:deliberations') &&
+        !(await this.estCorrecteur(cours, acteur)),
+      anonymatObligatoire: regles.anonymatObligatoire,
       poidsControleContinu: regles.poidsControleContinu,
       evaluations: evaluations.map(({ notes, ...evaluation }) => ({
         ...evaluation,
@@ -466,7 +480,11 @@ export class EvaluationsService {
       );
     if (evaluation.anonyme)
       throw new ConflictException(
-        "Cette évaluation est anonyme : les notes se saisissent par numéro d'anonymat",
+        "Cette évaluation est anonyme : les notes se saisissent par code d'anonymat",
+      );
+    if ((await this.structure.regles()).anonymatObligatoire)
+      throw new ConflictException(
+        "L'anonymat est obligatoire : la scolarité génère d'abord les fiches d'anonymat, puis les notes se saisissent par code",
       );
     if (!Array.isArray(body.notes))
       throw new BadRequestException('Aucune note transmise');
@@ -523,12 +541,56 @@ export class EvaluationsService {
 
   // ---------- Anonymat des copies ----------
 
-  // Attribue à chaque étudiant un numéro tiré au hasard. Relancée, elle ne
-  // numérote que les étudiants arrivés depuis.
+  // Le correcteur d'un cours : l'enseignant qui en a la charge.
+  private async estCorrecteur(
+    cours: { enseignantId: string | null },
+    acteur: Acteur,
+  ) {
+    if (!cours.enseignantId) return false;
+    const employe = await this.prisma.employe.findUnique({
+      where: { utilisateurId: acteur.id },
+      select: { id: true },
+    });
+    return employe?.id === cours.enseignantId;
+  }
+
+  // Fiches et table d'anonymat : la scolarité seule, jamais celui qui corrige.
+  private async exigerGardienAnonymat(
+    cours: { enseignantId: string | null },
+    acteur: Acteur,
+  ) {
+    if (!peut(acteur, 'edit:deliberations'))
+      throw new ForbiddenException(
+        "Les fiches et la table d'anonymat sont réservées au service de scolarité",
+      );
+    if (await this.estCorrecteur(cours, acteur))
+      throw new ForbiddenException(
+        "Vous corrigez cette matière : ses fiches et sa table d'anonymat vous sont fermées",
+      );
+  }
+
+  // Efface les codes des épreuves validées depuis longtemps : ils peuvent resservir.
+  private async purgerCodesPerimes() {
+    const limite = new Date(
+      Date.now() - CONSERVATION_CODES_JOURS * 24 * 60 * 60 * 1000,
+    );
+    await this.prisma.note.updateMany({
+      where: {
+        codeAnonymat: { not: null },
+        evaluation: { statut: 'VALIDEE', dateValidation: { lt: limite } },
+      },
+      data: { codeAnonymat: null, numeroAnonymat: null },
+    });
+  }
+
+  // Attribue à chaque étudiant un code tiré au hasard, propre à cette épreuve.
+  // Relancée, elle ne code que les étudiants arrivés depuis.
   async anonymiser(id: string, acteur: Acteur) {
     const { evaluation, cours } = await this.evaluationOuverte(id, acteur);
+    await this.exigerGardienAnonymat(cours, acteur);
     if (evaluation.statut !== 'OUVERTE')
       throw new ConflictException('Cette évaluation est déjà validée');
+    await this.purgerCodesPerimes();
     const [etudiants, notes] = await Promise.all([
       this.prisma.inscription.findMany({
         where: { classeId: cours.classeId, statut: { not: 'ABANDONNEE' } },
@@ -545,9 +607,16 @@ export class EvaluationsService {
       );
     const numerotes = new Set(
       notes
-        .filter((note) => note.numeroAnonymat !== null)
+        .filter((note) => note.codeAnonymat !== null)
         .map((note) => note.inscriptionId),
     );
+    const pris = new Set(notes.map((note) => note.codeAnonymat));
+    const nouveauCode = () => {
+      let code = tirerCode();
+      while (pris.has(code)) code = tirerCode();
+      pris.add(code);
+      return code;
+    };
     const nouveaux = etudiants
       .filter((etudiant) => !numerotes.has(etudiant.id))
       .map((etudiant) => ({ id: etudiant.id, tirage: Math.random() }))
@@ -563,6 +632,7 @@ export class EvaluationsService {
       }),
       ...nouveaux.map((etudiant) => {
         numero += 1;
+        const codeAnonymat = nouveauCode();
         return this.prisma.note.upsert({
           where: {
             evaluationId_inscriptionId: {
@@ -574,9 +644,10 @@ export class EvaluationsService {
             evaluationId: id,
             inscriptionId: etudiant.id,
             numeroAnonymat: numero,
+            codeAnonymat,
             saisieParNom: acteur.nom,
           },
-          update: { numeroAnonymat: numero },
+          update: { numeroAnonymat: numero, codeAnonymat },
         });
       }),
     ]);
@@ -590,12 +661,12 @@ export class EvaluationsService {
     return { evaluation, cours };
   }
 
-  // Ce que voit le correcteur : des numéros, jamais des noms.
+  // Ce que voit le correcteur : des codes, jamais des noms.
   async copies(id: string, acteur: Acteur) {
     const { evaluation } = await this.evaluationAnonyme(id, acteur);
     const notes = await this.prisma.note.findMany({
-      where: { evaluationId: id, numeroAnonymat: { not: null } },
-      orderBy: { numeroAnonymat: 'asc' },
+      where: { evaluationId: id, codeAnonymat: { not: null } },
+      orderBy: { codeAnonymat: 'asc' },
     });
     return {
       evaluation: {
@@ -606,6 +677,7 @@ export class EvaluationsService {
       },
       copies: notes.map((note) => ({
         numero: note.numeroAnonymat,
+        code: note.codeAnonymat,
         valeur: note.valeur === null ? null : Number(note.valeur),
         absent: note.absent,
       })),
@@ -613,27 +685,34 @@ export class EvaluationsService {
   }
 
   async saisirCopies(id: string, body: Body, acteur: Acteur) {
-    const { evaluation } = await this.evaluationAnonyme(id, acteur);
+    const { evaluation, cours } = await this.evaluationAnonyme(id, acteur);
     if (evaluation.statut !== 'OUVERTE')
       throw new ConflictException(
         'Les notes de cette évaluation sont validées',
       );
+    // Épreuve rouverte après la levée de l'anonymat : les noms sont connus,
+    // la correction des notes revient à la scolarité.
+    if (evaluation.anonymatLeveLe)
+      await this.exigerGardienAnonymat(cours, acteur);
     if (!Array.isArray(body.notes))
       throw new BadRequestException('Aucune note transmise');
     const bareme = Number(evaluation.bareme);
-    const connus = new Map(
-      (
-        await this.prisma.note.findMany({
-          where: { evaluationId: id, numeroAnonymat: { not: null } },
-        })
-      ).map((note) => [note.numeroAnonymat, note.id]),
+    const copies = await this.prisma.note.findMany({
+      where: { evaluationId: id, codeAnonymat: { not: null } },
+    });
+    const parCode = new Map(copies.map((note) => [note.codeAnonymat, note.id]));
+    const parNumero = new Map(
+      copies.map((note) => [note.numeroAnonymat, note.id]),
     );
     const saisies = (body.notes as Body[]).map((item) => {
-      const numero = Number(item?.numero);
-      const noteId = connus.get(numero);
+      const code =
+        typeof item?.code === 'string' ? item.code.trim().toUpperCase() : '';
+      const noteId = code
+        ? parCode.get(code)
+        : parNumero.get(Number(item?.numero));
       if (!noteId)
         throw new BadRequestException(
-          `Le numéro d'anonymat ${String(item?.numero)} n'existe pas pour cette évaluation`,
+          `Le code d'anonymat ${code || String(item?.numero)} n'existe pas pour cette évaluation`,
         );
       const absent = item?.absent === true;
       const vide =
@@ -662,30 +741,96 @@ export class EvaluationsService {
     return this.copies(id, acteur);
   }
 
-  // Table de correspondance numéro → étudiant : réservée à la scolarité, jamais au correcteur.
+  // Table de correspondance code → étudiant : c'est elle qu'on imprime en
+  // fiches d'anonymat. Réservée à la scolarité, jamais au correcteur.
   async correspondance(id: string, acteur: Acteur) {
-    if (!peut(acteur, 'edit:deliberations'))
-      throw new ForbiddenException(
-        "La table d'anonymat est réservée au service de scolarité",
-      );
     const { evaluation, cours } = await this.evaluationAnonyme(id, acteur);
+    await this.exigerGardienAnonymat(cours, acteur);
     const notes = await this.prisma.note.findMany({
-      where: { evaluationId: id, numeroAnonymat: { not: null } },
+      where: { evaluationId: id, codeAnonymat: { not: null } },
       include: { inscription: { include: { personne: true } } },
     });
     return {
       evaluation: evaluation.libelle,
+      type: evaluation.type,
+      date: evaluation.date,
       matiere: cours.matiere.nom,
       classe: this.structure.nomClasse(cours.classe),
+      annee: cours.classe.anneeAcademique.libelle,
       lignes: notes
         .map((note) => ({
           numero: note.numeroAnonymat,
+          code: note.codeAnonymat,
           nom: note.inscription.personne.nom,
           prenom: note.inscription.personne.prenom,
           matricule: note.inscription.personne.matricule,
         }))
         .sort((a, b) => a.nom.localeCompare(b.nom)),
     };
+  }
+
+  // Liste d'appel de l'épreuve : la scolarité, qui sait qui était là, note les
+  // absents par leur nom. Le correcteur verra seulement « copie absente » en
+  // face des codes concernés.
+  async absents(id: string, acteur: Acteur) {
+    const { evaluation, cours } = await this.evaluationAnonyme(id, acteur);
+    await this.exigerGardienAnonymat(cours, acteur);
+    const notes = await this.prisma.note.findMany({
+      where: { evaluationId: id, codeAnonymat: { not: null } },
+      include: { inscription: { include: { personne: true } } },
+    });
+    return {
+      evaluation: evaluation.libelle,
+      etudiants: notes
+        .map((note) => ({
+          inscriptionId: note.inscriptionId,
+          nom: note.inscription.personne.nom,
+          prenom: note.inscription.personne.prenom,
+          matricule: note.inscription.personne.matricule,
+          absent: note.absent,
+        }))
+        .sort((a, b) => a.nom.localeCompare(b.nom)),
+    };
+  }
+
+  async marquerAbsents(id: string, body: Body, acteur: Acteur) {
+    const { evaluation, cours } = await this.evaluationAnonyme(id, acteur);
+    await this.exigerGardienAnonymat(cours, acteur);
+    if (evaluation.statut !== 'OUVERTE')
+      throw new ConflictException(
+        'Les notes de cette évaluation sont validées',
+      );
+    if (!Array.isArray(body.inscriptionIds))
+      throw new BadRequestException("La liste d'appel est vide");
+    const absents = new Set(
+      (body.inscriptionIds as unknown[]).filter(
+        (item): item is string => typeof item === 'string',
+      ),
+    );
+    const notes = await this.prisma.note.findMany({
+      where: { evaluationId: id, codeAnonymat: { not: null } },
+    });
+    const connus = new Set(notes.map((note) => note.inscriptionId));
+    if ([...absents].some((inscriptionId) => !connus.has(inscriptionId)))
+      throw new BadRequestException(
+        "Un étudiant marqué absent n'a pas de fiche pour cette évaluation",
+      );
+    await this.prisma.$transaction([
+      // Un absent n'a pas de copie : sa note éventuelle est effacée.
+      this.prisma.note.updateMany({
+        where: { evaluationId: id, inscriptionId: { in: [...absents] } },
+        data: { absent: true, valeur: null, saisieParNom: acteur.nom },
+      }),
+      this.prisma.note.updateMany({
+        where: {
+          evaluationId: id,
+          absent: true,
+          inscriptionId: { notIn: [...absents] },
+        },
+        data: { absent: false, saisieParNom: acteur.nom },
+      }),
+    ]);
+    return this.absents(id, acteur);
   }
 
   // La validation verrouille les notes : elle relève de la scolarité, pas de celui qui saisit.
@@ -697,6 +842,8 @@ export class EvaluationsService {
     const { evaluation, cours } = await this.evaluationOuverte(id, acteur);
     if (evaluation.statut !== 'OUVERTE')
       throw new ConflictException('Cette évaluation est déjà validée');
+    // Valider lève l'anonymat : celui qui corrige ne le fait pas lui-même.
+    if (evaluation.anonyme) await this.exigerGardienAnonymat(cours, acteur);
     const [inscrits, dispenses, notes] = await Promise.all([
       this.prisma.inscription.findMany({
         where: { classeId: cours.classeId, statut: { not: 'ABANDONNEE' } },
@@ -741,6 +888,9 @@ export class EvaluationsService {
         valideParId: acteur.id,
         valideParNom: acteur.nom,
         dateValidation: new Date(),
+        ...(evaluation.anonyme && !evaluation.anonymatLeveLe
+          ? { anonymatLeveLe: new Date() }
+          : {}),
       },
     });
     return this.grille(cours.id, acteur);

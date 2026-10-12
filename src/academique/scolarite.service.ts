@@ -14,9 +14,19 @@ import {
   texteRequis,
 } from '../common/saisie';
 import { PrismaService } from '../prisma/prisma.service';
+import { CAHIER_A_COMPLETER } from '../rh/rh.rules';
 import { StructureService } from './structure.service';
 
 type Body = Record<string, unknown>;
+const JOURS = [
+  'dimanche',
+  'lundi',
+  'mardi',
+  'mercredi',
+  'jeudi',
+  'vendredi',
+  'samedi',
+];
 type Absent = {
   inscriptionId: string;
   justifiee: boolean;
@@ -32,8 +42,22 @@ export class ScolariteService {
   ) {}
 
   // Les heures d'un mois dont la paie est validée sont figées : elles ont servi au calcul.
-  private async refuserSiPaieValidee(date: Date, enseignantId: string | null) {
+  private async refuserSiPaieValidee(
+    date: Date,
+    enseignantId: string | null,
+    periodePaieId?: string | null,
+  ) {
     if (!enseignantId) return;
+    // Heures réglées par une paie validée, quel que soit le mois de la séance.
+    if (periodePaieId) {
+      const paie = await this.prisma.periodePaie.findUnique({
+        where: { id: periodePaieId },
+      });
+      if (paie && paie.statut !== 'OUVERTE')
+        throw new ConflictException(
+          'Cette séance a été payée à son enseignant : elle ne peut plus être modifiée ni supprimée',
+        );
+    }
     const periode = await this.prisma.periodePaie.findUnique({
       where: {
         annee_mois: {
@@ -87,6 +111,29 @@ export class ScolariteService {
       );
     const heureDebut = parseHeure(body.heureDebut, "L'heure de début");
     const dureeMinutes = parseEntier(body.dureeMinutes, 'La durée', 30, 480);
+    // Une séance s'émarge sur un créneau de l'emploi du temps : même jour, même
+    // heure. Seule une séance exceptionnelle (rattrapage) y échappe.
+    const horsCreneau = body.horsCreneau === true;
+    if (!horsCreneau) {
+      const creneaux = await this.prisma.creneau.findMany({
+        where: { coursId: cours.id },
+        orderBy: [{ jour: 'asc' }, { heureDebut: 'asc' }],
+      });
+      const jour = date.getUTCDay();
+      if (
+        !creneaux.some(
+          (creneau) =>
+            creneau.jour === jour && creneau.heureDebut === heureDebut,
+        )
+      )
+        throw new BadRequestException(
+          `Ce cours n'a pas de créneau le ${JOURS[jour]} à ${heureDebut} (${
+            creneaux.length
+              ? `prévu : ${creneaux.map((creneau) => `${JOURS[creneau.jour]} ${creneau.heureDebut}`).join(', ')}`
+              : "aucun créneau dans l'emploi du temps"
+          }). Pour un rattrapage, déclarez une séance exceptionnelle.`,
+        );
+    }
     // Le cahier de textes est obligatoire : pas de séance sans contenu enseigné.
     const contenu = texteRequis(
       body.contenu,
@@ -106,11 +153,31 @@ export class ScolariteService {
     const doublon = await this.prisma.seanceCours.findFirst({
       where: { coursId: cours.id, date, heureDebut },
     });
+    const absents = await this.absents(body, cours.classeId);
+    // Séance déjà émargée par la scolarité : la déclaration vient remplir son
+    // cahier de textes et son appel, sans changer les heures émargées.
+    if (doublon?.contenu === CAHIER_A_COMPLETER)
+      return this.prisma.$transaction(async (transaction) => {
+        await transaction.absenceEtudiant.deleteMany({
+          where: { seanceId: doublon.id },
+        });
+        await transaction.absenceEtudiant.createMany({
+          data: absents.map((absent) => ({ ...absent, seanceId: doublon.id })),
+        });
+        return transaction.seanceCours.update({
+          where: { id: doublon.id },
+          data: { contenu },
+          include: { absences: true },
+        });
+      });
     if (doublon)
       throw new ConflictException(
         'Cette séance est déjà déclarée (même cours, même jour, même heure)',
       );
-    const absents = await this.absents(body, cours.classeId);
+    // L'enseignant est venu : une absence notée sur ce créneau n'a plus lieu d'être.
+    await this.prisma.absenceEnseignant.deleteMany({
+      where: { coursId: cours.id, date, heureDebut },
+    });
     return this.prisma.seanceCours.create({
       data: {
         coursId: cours.id,
@@ -118,6 +185,7 @@ export class ScolariteService {
         heureDebut,
         dureeMinutes,
         contenu,
+        horsCreneau,
         enseignantId,
         saisieParId: acteur.id,
         saisieParNom: acteur.nom,
@@ -132,7 +200,11 @@ export class ScolariteService {
     if (!seance) throw new NotFoundException('Séance introuvable');
     const cours = await this.structure.exigerCours(seance.coursId, acteur);
     await this.structure.classeOuverte(cours.classeId);
-    await this.refuserSiPaieValidee(seance.date, seance.enseignantId);
+    await this.refuserSiPaieValidee(
+      seance.date,
+      seance.enseignantId,
+      seance.periodePaieId,
+    );
     return { seance, cours };
   }
 

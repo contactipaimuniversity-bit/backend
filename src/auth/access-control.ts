@@ -161,7 +161,7 @@ export function requiredPermissionForRequest(
       : ['edit:teaching'];
   if (sous('/notes')) {
     if (isRead) return ['view:grades', 'view:deliberations', 'view:academics'];
-    return /\/(valider|rouvrir|anonymat)$/.test(normalizedPath)
+    return /\/(valider|rouvrir|anonymat|absents)$/.test(normalizedPath)
       ? ['edit:deliberations']
       : ['edit:grades'];
   }
@@ -171,6 +171,11 @@ export function requiredPermissionForRequest(
     return isRead
       ? ['view:deliberations', 'view:academics']
       : ['edit:deliberations'];
+  // L'émargement des enseignants se tient à la scolarité comme à la RH.
+  if (sous('/rh/pointage/enseignants'))
+    return isRead
+      ? ['view:hr', 'view:teaching', 'view:academics']
+      : ['edit:hr', 'edit:teaching'];
   // Personnel et paie : préparer et valider la paie sont deux rôles distincts.
   if (sous('/rh')) {
     if (!isRead) return ['edit:hr'];

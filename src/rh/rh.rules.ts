@@ -14,6 +14,47 @@ export const TYPES_CONGE = [
   'PERMISSION',
   'SANS_SOLDE',
 ] as const;
+// Séance créée par l'émargement, en attendant que le cahier de textes soit rempli.
+export const CAHIER_A_COMPLETER = 'Cahier de textes à compléter';
+
+// Rythme de paiement des heures d'un enseignant payé à la séance.
+export const PERIODICITES_PAIE = [
+  'MENSUEL',
+  'BIMESTRIEL',
+  'TRIMESTRIEL',
+  'SEMESTRIEL',
+] as const;
+const MOIS_PAR_ECHEANCE: Record<string, number> = {
+  MENSUEL: 1,
+  BIMESTRIEL: 2,
+  TRIMESTRIEL: 3,
+};
+
+// Les heures d'un contrat sont-elles à verser dans la paie de ce mois ?
+// Le rythme se compte depuis le début du contrat ; son dernier mois solde
+// toujours le compte. Le paiement par semestre ne tombe jamais tout seul :
+// la RH le déclenche quand le semestre est terminé.
+export function echeanceDue(
+  contrat: { periodicitePaie: string; dateDebut: Date; dateFin: Date | null },
+  annee: number,
+  mois: number,
+): boolean {
+  const fin = contrat.dateFin;
+  if (fin && fin.getUTCFullYear() === annee && fin.getUTCMonth() + 1 === mois)
+    return true;
+  const rythme = MOIS_PAR_ECHEANCE[contrat.periodicitePaie];
+  if (!rythme) return false;
+  const ecoules =
+    (annee - contrat.dateDebut.getUTCFullYear()) * 12 +
+    (mois - 1 - contrat.dateDebut.getUTCMonth());
+  return ecoules >= 0 && (ecoules + 1) % rythme === 0;
+}
+
+// Taux horaire d'un tarif négocié « tel montant pour telle durée ».
+export function tauxHoraireDuTarif(montant: number, minutes: number): number {
+  return Math.round(((montant * 60) / minutes) * 100) / 100;
+}
+
 export const MODES_PAIEMENT = ['ESPECES', 'VIREMENT', 'MOBILE_MONEY'] as const;
 export const TYPES_RUBRIQUE = ['GAIN', 'RETENUE', 'PATRONALE'] as const;
 export const MODES_RUBRIQUE = [
