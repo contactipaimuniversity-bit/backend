@@ -212,6 +212,8 @@ export function requiredPermissionForRequest(
     ['/inscriptions', 'enrollments'],
     ['/paiements', 'payments'],
     ['/prospects', 'prospects'],
+    // Les lycéens du formulaire public se suivent avec les prospects.
+    ['/futurs-etudiants', 'prospects'],
     ['/personnes', 'people'],
     ['/candidatures-personnel', 'recruiting'],
     ['/types-bourse', 'references'],

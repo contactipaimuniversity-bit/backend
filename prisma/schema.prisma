@@ -1458,3 +1458,30 @@ model Sauvegarde {
   @@index([date])
   @@map("sauvegardes")
 }
+
+// Lycéen qui s'est signalé par le formulaire public « /enregistrements ».
+// Fiche informative : aucun lien avec les personnes ni avec les dossiers.
+model FuturEtudiant {
+  id                 String   @id @default(uuid())
+  nom                String
+  prenom             String
+  // M ou F
+  sexe               String
+  dateNaissance      DateTime
+  telephone          String?
+  ecole              String
+  classe             String
+  serie              String
+  tuteurNom          String
+  tuteurPrenom       String
+  tuteurTelephone    String
+  filiereSouhaitee   String
+  dateEnregistrement DateTime @default(now())
+  // Empreinte de l'adresse d'origine : sert seulement à freiner les envois en rafale.
+  origine            String?
+  contacte           Boolean  @default(false)
+
+  @@index([dateEnregistrement])
+  @@index([filiereSouhaitee])
+  @@map("futurs_etudiants")
+}

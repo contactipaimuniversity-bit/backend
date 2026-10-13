@@ -28,6 +28,7 @@ import { SauvegardesModule } from './sauvegardes/sauvegardes.module';
 import { AuditInterceptor } from './audit/audit.interceptor';
 import { VersionInterceptor } from './common/version.interceptor';
 import { SynchronisationModule } from './synchronisation/synchronisation.module';
+import { FutursEtudiantsModule } from './futurs-etudiants/futurs-etudiants.module';
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { SynchronisationModule } from './synchronisation/synchronisation.module'
     DocumentsModule,
     SauvegardesModule,
     SynchronisationModule,
+    FutursEtudiantsModule,
   ],
   controllers: [AppController],
   providers: [

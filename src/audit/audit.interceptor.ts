@@ -34,7 +34,9 @@ export class AuditInterceptor implements NestInterceptor {
       ['GET', 'HEAD', 'OPTIONS'].includes(method) ||
       request.path.startsWith('/audit') ||
       // L'historique des impressions a sa propre page.
-      request.path.startsWith('/impressions')
+      request.path.startsWith('/impressions') ||
+      // Formulaire public des lycéens : ses envois ont leur propre liste.
+      request.path.startsWith('/enregistrements')
     )
       return next.handle();
 

@@ -1667,6 +1667,85 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     expect(augmente.body.contrats[1].motifFin).toMatch(/Révision/);
   });
 
+  // ---------- Formulaire public des futurs étudiants ----------
+
+  it('reçoit les lycéens par le formulaire public, sans rien exposer', async () => {
+    const serveur = app.getHttpServer();
+    const options = await request(serveur)
+      .get('/enregistrements/options')
+      .expect(200);
+    expect(options.body.classes).toContain('Terminale');
+    const fiche = {
+      nom: 'Ngoma',
+      prenom: 'Grâce-Divine',
+      sexe: 'F',
+      dateNaissance: `${annee - 18}-03-14`,
+      ecole: 'Lycée Savorgnan de Brazza',
+      classe: 'Terminale',
+      serie: 'D',
+      tuteurNom: 'Ngoma',
+      tuteurPrenom: 'Paul',
+      tuteurTelephone: '06 600 11 22',
+      filiereSouhaitee: 'Génie civil',
+    };
+    const envoyer = (corps: Body) =>
+      request(serveur).post('/enregistrements').send(corps);
+    // Sans connexion : l'envoi est accepté et ne renvoie aucune donnée.
+    const recu = await envoyer(fiche).expect(200);
+    expect(recu.body).toEqual({ enregistre: true });
+    // Saisie invalide ou hostile : refusée.
+    const refus = await envoyer({
+      ...fiche,
+      nom: '<script>alert(1)</script>',
+    }).expect(400);
+    expect(refus.body.message).toMatch(/caractères non autorisés/);
+    // Robot qui remplit le champ caché : réponse normale, rien d'enregistré.
+    await envoyer({ ...fiche, prenom: 'Robot', site: 'http://spam' }).expect(
+      200,
+    );
+    // Le même élève qui renvoie le formulaire ne crée pas de doublon.
+    await envoyer({ ...fiche, serie: 'C' }).expect(200);
+    await envoyer({
+      ...fiche,
+      prenom: 'Junior',
+      sexe: 'M',
+      filiereSouhaitee: 'Informatique de gestion',
+    }).expect(200);
+    // Une classe entière passe depuis la même adresse ; au-delà de quarante
+    // envois en dix minutes, l'origine est freinée.
+    for (let envoi = 5; envoi < 40; envoi += 1)
+      await envoyer({ ...fiche, site: 'http://spam' }).expect(200);
+    await envoyer(fiche).expect(429);
+
+    // La liste est réservée à l'administration.
+    await request(serveur).get('/futurs-etudiants').expect(401);
+    await api('prof').get('/futurs-etudiants').expect(403);
+    const liste = await api('admin').get('/futurs-etudiants').expect(200);
+    expect(liste.body.meta.total).toBe(2);
+    const grace = liste.body.data.find(
+      (item: Body) => item.prenom === 'Grâce-Divine',
+    );
+    expect(grace).toMatchObject({
+      nom: 'NGOMA',
+      serie: 'C',
+      tuteurTelephone: '066001122',
+      contacte: false,
+    });
+    expect(grace.origine).toBeUndefined();
+    const synthese = await api('admin')
+      .get('/futurs-etudiants/synthese')
+      .expect(200);
+    expect(synthese.body).toMatchObject({ total: 2, filles: 1, aContacter: 2 });
+    const contacte = await api('admin')
+      .patch(`/futurs-etudiants/${grace.id}`, { contacte: true })
+      .expect(200);
+    expect(contacte.body.contacte).toBe(true);
+    await api('admin').delete(`/futurs-etudiants/${grace.id}`).expect(200);
+    // Un envoi public n'entre pas dans le journal d'audit.
+    const journal = await api('admin').get('/audit/actions?limit=200');
+    expect(JSON.stringify(journal.body)).not.toMatch(/enregistrements/);
+  });
+
   it('clôture l’année académique et la rend définitive', async () => {
     await api('scolarite')
       .patch(`/academique/annees/${ids.annee}`, { statut: 'CLOTUREE' })
