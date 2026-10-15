@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import type { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { parseDateOrder } from '../common/date-order';
 import type { SaisieLocale } from '../common/saisie-locale';
@@ -196,9 +197,32 @@ export class PaiementsService {
     });
   }
 
-  async findAll(rawDateOrder?: string) {
+  // Sans recherche : tout le journal. Avec q : les opérations dont le numéro de
+  // reçu ou le nom de la personne correspond (recherche rapide de l'en-tête).
+  async findAll(rawDateOrder?: string, rawQuery?: string, rawLimit?: string) {
     const ordreDate = parseDateOrder(rawDateOrder);
+    const q = rawQuery?.trim().slice(0, 80);
+    const personne = (texte: string): Prisma.PersonneWhereInput => ({
+      OR: [
+        { nom: { contains: texte, mode: 'insensitive' } },
+        { prenom: { contains: texte, mode: 'insensitive' } },
+      ],
+    });
+    const where: Prisma.PaiementWhereInput | undefined = q
+      ? {
+          OR: [
+            { numeroRecu: { contains: q, mode: 'insensitive' } },
+            { demandeBourse: { personne: personne(q) } },
+            { inscription: { personne: personne(q) } },
+          ],
+        }
+      : undefined;
+    const limit = q
+      ? Math.min(Math.max(Number.parseInt(rawLimit ?? '', 10) || 10, 1), 50)
+      : undefined;
     const payments = await this.prisma.paiement.findMany({
+      where,
+      take: limit,
       include: {
         demandeBourse: { include: { personne: true } },
         inscription: { include: { personne: true } },

@@ -57,14 +57,26 @@ describe('requiredPermissionForRequest', () => {
   });
 
   it('lets dossier agents read the people list and scholarship types they need', () => {
-    expect(requiredPermissionForRequest('/personnes', 'GET')).toEqual([
+    const guichet = [
       'view:people',
       'view:scholarships',
       'view:enrollments',
+      'view:payments',
+    ];
+    expect(requiredPermissionForRequest('/personnes', 'GET')).toEqual(guichet);
+    // La fiche unique d'une personne s'ouvre depuis la caisse comme depuis un dossier.
+    expect(requiredPermissionForRequest('/personnes/123', 'GET')).toEqual(
+      guichet,
+    );
+    expect(
+      requiredPermissionForRequest('/personnes/123/historique', 'GET'),
+    ).toEqual(guichet);
+    expect(requiredPermissionForRequest('/personnes/123', 'PATCH')).toEqual([
+      'edit:people',
     ]);
-    expect(requiredPermissionForRequest('/personnes/123', 'GET')).toEqual([
-      'view:people',
-    ]);
+    expect(
+      requiredPermissionForRequest('/personnes/123/photo', 'POST'),
+    ).toEqual(['edit:people', 'edit:scholarships', 'edit:enrollments']);
     expect(requiredPermissionForRequest('/types-bourse', 'GET')).toContain(
       'view:payments',
     );
@@ -98,6 +110,27 @@ describe('requiredPermissionForRequest', () => {
     expect(
       requiredPermissionForRequest('/finances/fournisseurs/123', 'PATCH'),
     ).toEqual(['edit:finance-settings']);
+  });
+
+  it('lets the entrance staff scan cards without editing them', () => {
+    expect(requiredPermissionForRequest('/cartes/scan', 'GET')).toEqual([
+      'view:card-scan',
+      'view:enrollments',
+      'view:academics',
+    ]);
+    expect(requiredPermissionForRequest('/cartes', 'POST')).toEqual([
+      'edit:enrollments',
+      'edit:academics',
+    ]);
+    expect(requiredPermissionForRequest('/cartes', 'GET')).not.toContain(
+      'view:card-scan',
+    );
+    expect(
+      requiredPermissionForRequest('/cartes/abc/desactivation', 'POST'),
+    ).toEqual(['edit:enrollments', 'edit:academics']);
+    expect(
+      requiredPermissionForRequest('/personnes/123/photo', 'GET'),
+    ).toContain('view:card-scan');
   });
 
   it('shows late payments to payment and report users', () => {

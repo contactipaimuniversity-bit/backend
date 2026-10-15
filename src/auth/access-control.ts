@@ -25,6 +25,7 @@ export const ACCESS_AREAS = [
   'payroll',
   'payroll-approval',
   'accounting',
+  'card-scan',
 ] as const;
 
 // Tous les acteurs du circuit de dépense lisent les mêmes données ; le service
@@ -58,9 +59,20 @@ export function requiredPermissionForRequest(
     return ['view:dashboard'];
   if (isRead && normalizedPath === '/rapports/paiements-en-retard')
     return ['view:reports', 'view:payments'];
-  // La liste des personnes sert à choisir le candidat d'un nouveau dossier.
-  if (isRead && normalizedPath === '/personnes')
-    return ['view:people', 'view:scholarships', 'view:enrollments'];
+  // La liste des personnes sert à choisir le candidat d'un nouveau dossier ;
+  // la fiche d'une personne réunit ses dossiers et ce qu'elle a payé, au guichet.
+  if (
+    isRead &&
+    (normalizedPath === '/personnes' ||
+      /^\/personnes\/[^/]+(\/historique)?$/.test(normalizedPath)) &&
+    normalizedPath !== '/personnes/doublons'
+  )
+    return [
+      'view:people',
+      'view:scholarships',
+      'view:enrollments',
+      'view:payments',
+    ];
   // Avant de créer une personne, tout formulaire vérifie qu'elle n'existe pas déjà.
   if (isRead && normalizedPath === '/personnes/doublons')
     return [
@@ -71,8 +83,16 @@ export function requiredPermissionForRequest(
     ];
   // La photo se joint et se consulte depuis le formulaire ou la fiche d'un dossier.
   if (/^\/personnes\/[^/]+\/photo$/.test(normalizedPath)) {
-    const mode = isRead ? 'view' : 'edit';
-    return [`${mode}:people`, `${mode}:scholarships`, `${mode}:enrollments`];
+    if (isRead)
+      return [
+        'view:people',
+        'view:scholarships',
+        'view:enrollments',
+        'view:payments',
+        // L'agent d'accueil compare la photo au porteur de la carte.
+        'view:card-scan',
+      ];
+    return ['edit:people', 'edit:scholarships', 'edit:enrollments'];
   }
   if (
     isRead &&
@@ -128,6 +148,15 @@ export function requiredPermissionForRequest(
       ];
     return ['edit:expenses'];
   }
+  // Cartes d'étudiant : la scolarité les édite ; elle et les agents d'accueil les scannent.
+  if (normalizedPath === '/cartes/scan')
+    return isRead
+      ? ['view:card-scan', 'view:enrollments', 'view:academics']
+      : ['edit:academics'];
+  if (normalizedPath === '/cartes' || normalizedPath.startsWith('/cartes/'))
+    return isRead
+      ? ['view:enrollments', 'view:academics']
+      : ['edit:enrollments', 'edit:academics'];
   const sous = (prefix: string) =>
     normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
   // Académique : la structure se règle par la scolarité, les séances et les

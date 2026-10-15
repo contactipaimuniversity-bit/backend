@@ -482,6 +482,16 @@ export class InscriptionsService {
     if (updateDto.niveau !== undefined) {
       data.niveau = await this.parseNiveau(updateDto.niveau);
     }
+    // Un étudiant déjà en classe garde le niveau et l'année de sa classe.
+    if (
+      current.classe &&
+      ((data.niveau && data.niveau !== current.classe.niveau) ||
+        (data.anneeScolaire &&
+          data.anneeScolaire !== current.classe.anneeAcademique.libelle))
+    )
+      throw new ConflictException(
+        "Cet étudiant est déjà affecté à une classe : retirez-le d'abord de la classe pour changer son niveau ou son année",
+      );
     if (updateDto.filiere !== undefined || updateDto.filiereId) {
       const lien = await this.resoudreFiliere(
         updateDto.filiere,
@@ -846,7 +856,13 @@ export class InscriptionsService {
         niveau: true,
         viaBourse: true,
         demandeBourseId: true,
-        classe: { select: { filiereId: true } },
+        classe: {
+          select: {
+            filiereId: true,
+            niveau: true,
+            anneeAcademique: { select: { libelle: true } },
+          },
+        },
       },
     });
     if (!inscription) {

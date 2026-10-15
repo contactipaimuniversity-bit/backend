@@ -15,6 +15,7 @@ import { SearchDemandesBourseDto } from './dto/search-demandes-bourse.dto';
 import { UpdateDecisionDto } from './dto/update-decision.dto';
 import { UpdateElementDossierDto } from './dto/update-element-dossier.dto';
 import { UpdateEntretienDto } from './dto/update-entretien.dto';
+import { UpdateDemandeBourseDto } from './dto/update-demande-bourse.dto';
 import {
   requiredDeletionReason,
   toTrashSnapshot,
@@ -82,13 +83,7 @@ export class DemandesBourseService {
 
     return this.prisma.$transaction(async (transaction) => {
       const catalogue = await transaction.elementRequis.findMany({
-        where: {
-          contexte: { in: ['BOURSE', 'TOUS'] },
-          niveauApplicable:
-            niveauDemande === 'PREMIERE_ANNEE'
-              ? { in: ['PREMIERE_ANNEE', 'TOUS'] }
-              : { in: ['DEUXIEME_ANNEE', 'DEUXIEME_ANNEE_PLUS', 'TOUS'] },
-        },
+        where: this.catalogue(niveauDemande),
       });
       const statuses = createDto.preparation?.statuses ?? {};
       const dossierElements = catalogue.map((element) => {
@@ -490,6 +485,115 @@ export class DemandesBourseService {
       });
       await transaction.demandeBourse.delete({ where: { id } });
       return { id };
+    });
+  }
+
+  // Pièces et frais exigés d'une demande de bourse, selon son niveau.
+  private catalogue(niveau: NiveauValue) {
+    return {
+      contexte: { in: ['BOURSE' as const, 'TOUS' as const] },
+      niveauApplicable:
+        niveau === 'PREMIERE_ANNEE'
+          ? { in: ['PREMIERE_ANNEE' as const, 'TOUS' as const] }
+          : {
+              in: [
+                'DEUXIEME_ANNEE' as const,
+                'DEUXIEME_ANNEE_PLUS' as const,
+                'TOUS' as const,
+              ],
+            },
+    };
+  }
+
+  // Corrige le dossier lui-même : niveau, filières, école d'origine.
+  async updateInformations(id: string, updateDto: UpdateDemandeBourseDto) {
+    const current = await this.prisma.demandeBourse.findUnique({
+      where: { id },
+      select: { niveauDemande: true, _count: { select: { paiements: true } } },
+    });
+    if (!current) {
+      throw new NotFoundException('Demande de bourse introuvable');
+    }
+    const data: {
+      niveauDemande?: NiveauValue;
+      filiereSouhaitee?: string;
+      filiereSecondaireSouhaitee?: string | null;
+      ecoleOrigine?: string | null;
+    } = {};
+    if (updateDto.filiereSouhaitee !== undefined) {
+      data.filiereSouhaitee = this.requiredString(
+        updateDto.filiereSouhaitee,
+        'filiereSouhaitee',
+      );
+    }
+    if (updateDto.filiereSecondaireSouhaitee !== undefined) {
+      data.filiereSecondaireSouhaitee = this.optionalString(
+        updateDto.filiereSecondaireSouhaitee,
+      );
+    }
+    if (updateDto.ecoleOrigine !== undefined) {
+      data.ecoleOrigine = this.optionalString(updateDto.ecoleOrigine);
+    }
+    if (updateDto.niveauDemande !== undefined) {
+      const niveau = this.parseValue(
+        updateDto.niveauDemande,
+        NIVEAUX,
+        'niveauDemande',
+      );
+      if (niveau !== current.niveauDemande) {
+        // Les frais dépendent du niveau : une fois de l'argent reçu, on ne les change plus.
+        if (current._count.paiements > 0) {
+          throw new ConflictException(
+            'Des paiements sont déjà enregistrés sur ce dossier : son niveau ne peut plus changer',
+          );
+        }
+        data.niveauDemande = niveau;
+      }
+    }
+    if (Object.keys(data).length === 0) {
+      throw new BadRequestException('Aucune information a modifier');
+    }
+
+    return this.prisma.$transaction(async (transaction) => {
+      await transaction.demandeBourse.update({ where: { id }, data });
+      if (data.niveauDemande) {
+        // Nouveau niveau, nouvelles pièces : on garde celles qui restent exigées
+        // (avec leur statut), on retire les autres et on ajoute les nouvelles.
+        const catalogue = await transaction.elementRequis.findMany({
+          where: this.catalogue(data.niveauDemande),
+        });
+        const exiges = new Set(catalogue.map((element) => element.id));
+        const existants = await transaction.elementDossier.findMany({
+          where: { demandeBourseId: id },
+          select: { id: true, elementRequisId: true },
+        });
+        await transaction.elementDossier.deleteMany({
+          where: {
+            id: {
+              in: existants
+                .filter((element) => !exiges.has(element.elementRequisId))
+                .map((element) => element.id),
+            },
+          },
+        });
+        const presents = new Set(
+          existants.map((element) => element.elementRequisId),
+        );
+        await transaction.elementDossier.createMany({
+          data: catalogue
+            .filter((element) => !presents.has(element.id))
+            .map((element) => ({
+              demandeBourseId: id,
+              elementRequisId: element.id,
+              montantAttendu: element.montantAttendu,
+              statut: 'ATTENDU' as const,
+            })),
+        });
+      }
+      return transaction.demandeBourse.findUniqueOrThrow({
+        where: { id },
+        include: this.detailInclude(),
+      });
     });
   }
 

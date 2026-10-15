@@ -92,6 +92,13 @@ suite('Circuit de dépense (e2e)', () => {
       valideur2: ['view:expense-final-approval', 'edit:expense-final-approval'],
       comptable: ['view:expense-payment', 'edit:expense-payment'],
       gestionnaire: ['view:finance-settings', 'edit:finance-settings'],
+      // Demande et valide : ne doit jamais se voir proposer ses propres demandes.
+      chefService: [
+        'view:expenses',
+        'edit:expenses',
+        'view:expense-approval',
+        'edit:expense-approval',
+      ],
     };
     for (const [nom, permissions] of Object.entries(users)) {
       const user = await prisma.utilisateur.create({
@@ -407,5 +414,29 @@ suite('Circuit de dépense (e2e)', () => {
         montant: '500000',
       })
       .expect(409);
+  });
+
+  it('ne compte pas ses propres demandes parmi celles à valider', async () => {
+    const created = await api('chefService')
+      .post('/depenses', demande('1'))
+      .expect(201);
+    const path = `/depenses/${created.body.id}`;
+    await api('chefService')
+      .upload(`${path}/pieces`, { type: 'LETTRE_DEMANDE' })
+      .expect(201);
+    await api('chefService')
+      .upload(`${path}/pieces`, { type: 'DEVIS' })
+      .expect(201);
+    const brouillon = await api('chefService').get('/depenses/compteurs');
+    expect(brouillon.body).toMatchObject({ brouillons: 1, aValider: 0 });
+
+    await api('chefService').post(`${path}/soumettre`).expect(201);
+    // Son propre état de besoin n'apparaît pas dans son travail à faire...
+    const chef = await api('chefService').get('/depenses/compteurs');
+    expect(chef.body).toMatchObject({ brouillons: 0, aValider: 0 });
+    await api('chefService').post(`${path}/valider`).expect(403);
+    // ... mais bien dans celui d'un autre valideur.
+    const autre = await api('valideur1').get('/depenses/compteurs');
+    expect(autre.body.aValider).toBe(1);
   });
 });

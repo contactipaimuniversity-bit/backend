@@ -116,6 +116,8 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       paie: { permissions: droits('payroll', 'payroll-approval') },
       valideurPaie: { permissions: droits('payroll', 'payroll-approval') },
       comptable: { permissions: droits('accounting') },
+      // Agent d'accueil : il scanne les cartes, et rien d'autre.
+      accueil: { permissions: ['view:card-scan'] },
       gestionnaire: { permissions: droits('finance-settings') },
       admin: { role: 'admin', permissions: [] },
     };
@@ -387,6 +389,22 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     await api('scolarite')
       .delete(`/inscriptions/${ids.c}`, { motif: 'Tentative de suppression' })
       .expect(409);
+    // Ni son niveau ni son année ne changent tant qu'il est en classe...
+    const niveau = await api('scolarite')
+      .patch(`/inscriptions/${ids.c}`, { niveau: 'L2' })
+      .expect(409);
+    expect(niveau.body.message).toMatch(/affecté à une classe/);
+    await api('scolarite')
+      .patch(`/inscriptions/${ids.c}`, { anneeScolaire: '2099-2100' })
+      .expect(409);
+    // ... mais la même valeur, ou le statut, se modifient librement.
+    await api('scolarite')
+      .patch(`/inscriptions/${ids.c}`, {
+        niveau: 'L1',
+        anneeScolaire: libelleAnnee,
+        statut: 'EN_COURS',
+      })
+      .expect(200);
   });
 
   it('affecte les cours et détecte les conflits d’emploi du temps', async () => {
@@ -2017,6 +2035,22 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     expect(ligne(mobile.body.id).numeroRecu).toMatch(/^RC-\d{4}-\d{6}$/);
     expect(rang(especes.body.id)).toBe(rang(mobile.body.id) + 1);
 
+    // La recherche rapide retrouve un reçu par son numéro, sans renvoyer tout le journal.
+    const numero = ligne(mobile.body.id).numeroRecu as string;
+    const trouves = (
+      await api('scolarite').get(
+        `/paiements?q=${encodeURIComponent(numero.toLowerCase())}&limit=5`,
+      )
+    ).body as Body[];
+    expect(trouves.map((item) => item.id)).toEqual([mobile.body.id]);
+    const parNom = (
+      await api('scolarite').get(
+        `/paiements?q=${encodeURIComponent(ligne(mobile.body.id).personne.nom as string)}&limit=2`,
+      )
+    ).body as Body[];
+    expect(parNom.length).toBeGreaterThan(0);
+    expect(parNom.length).toBeLessThanOrEqual(2);
+
     // Le mobile money n'entre pas dans la caisse.
     const reference = (mobile.body.id as string).slice(0, 8).toUpperCase();
     const ecriture = (
@@ -2156,5 +2190,146 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .patch(`/academique/filieres/${filiere.body.id}`, { poleId: null })
       .expect(200);
     expect(detachee.body.pole).toBeNull();
+  });
+
+  it('corrige le niveau, les filières et l’école d’une demande de bourse', async () => {
+    const releve = await api('admin')
+      .post('/elements-requis', {
+        nom: 'Relevé de notes de première année',
+        categorie: 'DOCUMENT',
+        contexte: 'BOURSE',
+        niveauApplicable: 'DEUXIEME_ANNEE',
+      })
+      .expect(201);
+    const demande = await api('admin')
+      .post('/demandes-bourse', {
+        nouvellePersonne: { nom: 'Correction', prenom: 'Etu' },
+        niveauDemande: 'PREMIERE_ANNEE',
+        filiereSouhaitee: 'Informatique',
+      })
+      .expect(201);
+    const path = `/demandes-bourse/${demande.body.id}/informations`;
+    const pieces = (corps: Body) =>
+      (corps.elementsDossier as Body[]).map((item) => item.elementRequisId);
+    expect(pieces(demande.body)).not.toContain(releve.body.id);
+
+    // Sans le droit sur les bourses, rien ne se modifie.
+    await api('scolarite')
+      .patch(path, { filiereSouhaitee: 'Génie civil' })
+      .expect(403);
+    await api('admin').patch(path, {}).expect(400);
+    await api('admin').patch(path, { filiereSouhaitee: '  ' }).expect(400);
+
+    const corrigee = await api('admin')
+      .patch(path, {
+        niveauDemande: 'DEUXIEME_ANNEE',
+        filiereSouhaitee: 'Génie civil',
+        filiereSecondaireSouhaitee: 'Informatique',
+        ecoleOrigine: 'Lycée Savorgnan',
+      })
+      .expect(200);
+    expect(corrigee.body).toMatchObject({
+      niveauDemande: 'DEUXIEME_ANNEE',
+      filiereSouhaitee: 'Génie civil',
+      filiereSecondaireSouhaitee: 'Informatique',
+      ecoleOrigine: 'Lycée Savorgnan',
+    });
+    // Le nouveau niveau apporte ses propres pièces.
+    expect(pieces(corrigee.body)).toContain(releve.body.id);
+
+    // Une fois de l'argent reçu, le niveau est figé ; le reste se corrige encore.
+    await api('admin')
+      .post('/paiements', {
+        demandeBourseId: demande.body.id,
+        montant: 1000,
+        typePaiement: 'FRAIS_DEPOT',
+      })
+      .expect(201);
+    const fige = await api('admin')
+      .patch(path, { niveauDemande: 'PREMIERE_ANNEE' })
+      .expect(409);
+    expect(fige.body.message).toMatch(/niveau ne peut plus changer/);
+    await api('admin')
+      .patch(path, { ecoleOrigine: null, niveauDemande: 'DEUXIEME_ANNEE' })
+      .expect(200);
+  });
+
+  it('édite les cartes d’étudiant et ne reconnaît que les siennes au contrôle', async () => {
+    const editer = (inscriptionIds: string[], renouveler = false) =>
+      api('scolarite').post('/cartes', { inscriptionIds, renouveler });
+    const cartes = (await editer([ids.a, ids.b]).expect(201)).body as Body[];
+    expect(cartes).toHaveLength(2);
+    const carteA = cartes.find((item) => item.inscriptionId === ids.a)!;
+    expect(carteA.jeton).toMatch(/^IPAIM:C1:[A-Z2-7]{24}$/);
+    expect(carteA.personne.matricule).toMatch(/^\d{2}INFO000\d$/);
+    expect(carteA.annee).toBe(libelleAnnee);
+    // Réimprimer ne change pas la carte ; le QR code reste le même.
+    const reimprimee = (await editer([ids.a]).expect(201)).body as Body[];
+    expect(reimprimee[0].jeton).toBe(carteA.jeton);
+
+    // L'agent d'accueil scanne, mais n'édite ni ne consulte les cartes.
+    const scan = (code: string) =>
+      api('accueil').get(`/cartes/scan?code=${encodeURIComponent(code)}`);
+    const valide = await scan(carteA.jeton.toLowerCase()).expect(200);
+    expect(valide.body).toMatchObject({
+      verdict: 'VALIDE',
+      personne: { matricule: carteA.personne.matricule },
+      inscription: { id: ids.a },
+    });
+    expect(typeof valide.body.resteDu).toBe('number');
+    await api('accueil')
+      .post('/cartes', { inscriptionIds: [ids.a] })
+      .expect(403);
+    await api('accueil').get(`/cartes?inscriptionId=${ids.a}`).expect(403);
+    await api('prof').get(`/cartes/scan?code=${carteA.jeton}`).expect(403);
+
+    // Un code qui n'est pas à nous, ou un jeton inventé, ne passe pas.
+    await scan('https://exemple.com/carte/123').expect(400);
+    await scan(`IPAIM:C1:${'A'.repeat(24)}`).expect(404);
+
+    // Carte perdue : la nouvelle remplace l'ancienne, qui ne vaut plus rien.
+    const nouvelle = (
+      (await editer([ids.a], true).expect(201)).body as Body[]
+    )[0];
+    expect(nouvelle.jeton).not.toBe(carteA.jeton);
+    expect((await scan(carteA.jeton).expect(200)).body.verdict).toBe(
+      'DESACTIVEE',
+    );
+    expect((await scan(nouvelle.jeton).expect(200)).body.verdict).toBe(
+      'VALIDE',
+    );
+    const historique = (
+      await api('scolarite').get(`/cartes?inscriptionId=${ids.a}`).expect(200)
+    ).body as Body[];
+    expect(historique.map((item) => item.active)).toEqual([true, false]);
+
+    // Désactivation à la main, avec un motif.
+    await api('scolarite')
+      .post(`/cartes/${nouvelle.carteId}/desactivation`, {})
+      .expect(400);
+    await api('scolarite')
+      .post(`/cartes/${nouvelle.carteId}/desactivation`, {
+        motif: 'Carte volée',
+      })
+      .expect(201);
+    expect((await scan(nouvelle.jeton).expect(200)).body).toMatchObject({
+      verdict: 'DESACTIVEE',
+      carte: { motifDesactivation: 'Carte volée' },
+    });
+    await api('scolarite')
+      .post(`/cartes/${nouvelle.carteId}/desactivation`, { motif: 'Encore' })
+      .expect(409);
+
+    // Pas de matricule, pas de carte.
+    const sansClasse = await api('scolarite')
+      .post('/inscriptions', {
+        nouvellePersonne: { nom: 'Sanscarte', prenom: 'Etu' },
+        anneeScolaire: libelleAnnee,
+        niveau: 'L1',
+        filiere: 'Informatique',
+      })
+      .expect(201);
+    const refus = await editer([sansClasse.body.id]).expect(409);
+    expect(refus.body.message).toMatch(/matricule/);
   });
 });

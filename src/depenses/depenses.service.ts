@@ -239,20 +239,25 @@ export class DepensesService {
   }
 
   async compteurs(acteur: Acteur) {
-    const count = (statuts: StatutDepense[], mine = false) =>
+    // « mine » : ses propres demandes ; « others » : celles des autres, seules
+    // qu'on puisse valider (personne ne valide ce qu'il a initié).
+    const count = (statuts: StatutDepense[], scope?: 'mine' | 'others') =>
       this.prisma.depense.count({
         where: {
           statut: { in: statuts },
-          ...(mine ? { initiateurId: acteur.id } : {}),
+          ...(scope === 'mine' ? { initiateurId: acteur.id } : {}),
+          ...(scope === 'others' ? { initiateurId: { not: acteur.id } } : {}),
         },
       });
     const [brouillons, rejetees, validation1, validation2, aExecuter] =
       await Promise.all([
-        count(['BROUILLON'], true),
-        count(['REJETEE'], true),
-        peut(acteur, 'view:expense-approval') ? count(['SOUMISE']) : 0,
+        count(['BROUILLON'], 'mine'),
+        count(['REJETEE'], 'mine'),
+        peut(acteur, 'view:expense-approval')
+          ? count(['SOUMISE'], 'others')
+          : 0,
         peut(acteur, 'view:expense-final-approval')
-          ? count(['VALIDATION_FINALE'])
+          ? count(['VALIDATION_FINALE'], 'others')
           : 0,
         peut(acteur, 'view:expense-payment')
           ? count([...STATUTS_A_EXECUTER])

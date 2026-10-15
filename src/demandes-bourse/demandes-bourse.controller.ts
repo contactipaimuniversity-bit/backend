@@ -19,6 +19,7 @@ import { SearchDemandesBourseDto } from './dto/search-demandes-bourse.dto';
 import { UpdateDecisionDto } from './dto/update-decision.dto';
 import { UpdateElementDossierDto } from './dto/update-element-dossier.dto';
 import { UpdateEntretienDto } from './dto/update-entretien.dto';
+import { UpdateDemandeBourseDto } from './dto/update-demande-bourse.dto';
 import { DemandesBourseService } from './demandes-bourse.service';
 
 @Controller('demandes-bourse')
@@ -81,6 +82,14 @@ export class DemandesBourseController {
     @Body() updateDto: UpdateDecisionDto,
   ) {
     return this.demandesBourseService.updateDecision(id, updateDto);
+  }
+
+  @Patch(':id/informations')
+  updateInformations(
+    @Param('id') id: string,
+    @Body() updateDto: UpdateDemandeBourseDto,
+  ) {
+    return this.demandesBourseService.updateInformations(id, updateDto);
   }
 
   @Patch(':id')

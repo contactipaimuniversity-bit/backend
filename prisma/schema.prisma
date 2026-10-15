@@ -370,6 +370,7 @@ model Inscription {
   notes     Note[]
   resultats ResultatDeliberation[]
   credits   CreditUE[]
+  cartes    CarteEtudiant[]
 
   // Filière du référentiel. Le texte « filiere » reste ce qui a été saisi ;
   // ce lien fait foi dès qu'il existe (une faute de frappe ne casse plus rien).
@@ -1484,4 +1485,23 @@ model FuturEtudiant {
   @@index([dateEnregistrement])
   @@index([filiereSouhaitee])
   @@map("futurs_etudiants")
+}
+
+// Carte d'étudiant d'une année académique. Son QR code ne porte qu'un jeton tiré
+// au hasard : il ne dévoile rien à un lecteur ordinaire, ne se devine pas, et ne
+// vaut que tant que la carte est active (une carte perdue est désactivée).
+model CarteEtudiant {
+  id                 String      @id @default(uuid())
+  inscriptionId      String
+  inscription        Inscription @relation(fields: [inscriptionId], references: [id], onDelete: Cascade)
+  jeton              String      @unique
+  active             Boolean     @default(true)
+  valableJusquau     DateTime
+  creeLe             DateTime    @default(now())
+  creeParNom         String
+  desactiveeLe       DateTime?
+  motifDesactivation String?
+
+  @@index([inscriptionId])
+  @@map("cartes_etudiant")
 }

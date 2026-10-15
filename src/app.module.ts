@@ -29,6 +29,7 @@ import { AuditInterceptor } from './audit/audit.interceptor';
 import { VersionInterceptor } from './common/version.interceptor';
 import { SynchronisationModule } from './synchronisation/synchronisation.module';
 import { FutursEtudiantsModule } from './futurs-etudiants/futurs-etudiants.module';
+import { CartesModule } from './cartes/cartes.module';
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { FutursEtudiantsModule } from './futurs-etudiants/futurs-etudiants.modul
     SauvegardesModule,
     SynchronisationModule,
     FutursEtudiantsModule,
+    CartesModule,
   ],
   controllers: [AppController],
   providers: [

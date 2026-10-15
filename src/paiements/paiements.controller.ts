@@ -40,8 +40,12 @@ export class PaiementsController {
   }
 
   @Get('paiements')
-  findAll(@Query('ordreDate') ordreDate?: string) {
-    return this.paiementsService.findAll(ordreDate);
+  findAll(
+    @Query('ordreDate') ordreDate?: string,
+    @Query('q') q?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.paiementsService.findAll(ordreDate, q, limit);
   }
 
   @Get('paiements/non-affectes')
