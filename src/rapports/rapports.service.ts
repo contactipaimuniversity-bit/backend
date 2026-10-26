@@ -8,6 +8,275 @@ import { PeriodeRapportDto } from './dto/periode-rapport.dto';
 export class RapportsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  async recouvrement(query: {
+    type?: string;
+    statut?: string;
+    anneeScolaire?: string;
+    q?: string;
+    page?: string;
+    limit?: string;
+  }) {
+    const [demandes, inscriptions, annees] = await Promise.all([
+      this.prisma.demandeBourse.findMany({
+        select: {
+          id: true,
+          dateDepot: true,
+          statut: true,
+          niveauDemande: true,
+          filiereSouhaitee: true,
+          personne: {
+            select: {
+              nom: true,
+              prenom: true,
+              telephone: true,
+              matricule: true,
+            },
+          },
+          inscriptions: {
+            select: {
+              anneeScolaire: true,
+              paiements: {
+                where: { echeanceId: { not: null } },
+                select: { montant: true, typePaiement: true },
+              },
+            },
+            orderBy: { dateInscription: 'desc' },
+          },
+          typeBourse: {
+            select: { echeances: { select: { montantAttendu: true } } },
+          },
+          elementsDossier: {
+            select: {
+              montantAttendu: true,
+              paiements: {
+                select: { montant: true, typePaiement: true },
+              },
+            },
+          },
+          paiements: {
+            where: { elementDossierId: null },
+            select: { montant: true, typePaiement: true },
+          },
+        },
+      }),
+      this.prisma.inscription.findMany({
+        select: {
+          id: true,
+          dateInscription: true,
+          statut: true,
+          anneeScolaire: true,
+          niveau: true,
+          filiere: true,
+          personne: {
+            select: {
+              nom: true,
+              prenom: true,
+              telephone: true,
+              matricule: true,
+            },
+          },
+          elementsDossier: {
+            select: {
+              montantAttendu: true,
+              paiements: {
+                select: { montant: true, typePaiement: true },
+              },
+            },
+          },
+          paiements: {
+            where: { elementDossierId: null, echeanceId: null },
+            select: { montant: true, typePaiement: true },
+          },
+        },
+      }),
+      this.prisma.inscription.findMany({
+        select: { anneeScolaire: true },
+        distinct: ['anneeScolaire'],
+        orderBy: { anneeScolaire: 'desc' },
+      }),
+    ]);
+
+    type PaiementRecouvrement = { montant: unknown; typePaiement: string };
+    const preparer = (
+      type: 'BOURSE' | 'INSCRIPTION',
+      dossier: {
+        id: string;
+        date: Date;
+        statutDossier: string;
+        anneeScolaire: string | null;
+        niveau: string;
+        filiere: string;
+        montantsAttendusSupplementaires?: unknown[];
+        paiementsSupplementaires?: PaiementRecouvrement[];
+        personne: {
+          nom: string;
+          prenom: string;
+          telephone: string | null;
+          matricule: string | null;
+        };
+        elementsDossier: Array<{
+          montantAttendu: unknown;
+          paiements: PaiementRecouvrement[];
+        }>;
+        paiements: PaiementRecouvrement[];
+      },
+    ) => {
+      const paiementsElements = dossier.elementsDossier.flatMap(
+        (element) => element.paiements,
+      );
+      const tousPaiements = [...paiementsElements, ...dossier.paiements];
+      const montantAttendu = this.roundMoney(
+        dossier.elementsDossier.reduce(
+          (total, element) => total + Number(element.montantAttendu ?? 0),
+          0,
+        ) +
+          (dossier.montantsAttendusSupplementaires ?? []).reduce<number>(
+            (total, montant) => total + Number(montant ?? 0),
+            0,
+          ),
+      );
+      const paiements = dossier.paiementsSupplementaires ?? [];
+      const montantPaye = this.roundMoney(
+        [...tousPaiements, ...paiements].reduce(
+          (total, paiement) => total + Number(paiement.montant),
+          0,
+        ),
+      );
+      const encaisse = this.roundMoney(
+        [...tousPaiements, ...paiements]
+          .filter((paiement) => paiement.typePaiement !== 'REPORT')
+          .reduce((total, paiement) => total + Number(paiement.montant), 0),
+      );
+      const resteAPayer = this.roundMoney(
+        Math.max(0, montantAttendu - montantPaye),
+      );
+      const etat =
+        resteAPayer === 0 ? 'PAYE' : montantPaye > 0 ? 'DETTE' : 'IMPAYE';
+      return {
+        id: dossier.id,
+        type,
+        date: dossier.date,
+        statutDossier: dossier.statutDossier,
+        anneeScolaire: dossier.anneeScolaire,
+        niveau: dossier.niveau,
+        filiere: dossier.filiere,
+        personne: dossier.personne,
+        montantAttendu: this.money(montantAttendu),
+        montantPaye: this.money(montantPaye),
+        encaisse: this.money(encaisse),
+        resteAPayer: this.money(resteAPayer),
+        etat,
+      };
+    };
+
+    const lignes = [
+      ...demandes.map((demande) =>
+        preparer('BOURSE', {
+          id: demande.id,
+          date: demande.dateDepot,
+          statutDossier: demande.statut,
+          anneeScolaire: demande.inscriptions[0]?.anneeScolaire ?? null,
+          niveau: demande.niveauDemande,
+          filiere: demande.filiereSouhaitee,
+          personne: demande.personne,
+          elementsDossier: demande.elementsDossier,
+          paiements: demande.paiements,
+          montantsAttendusSupplementaires:
+            demande.statut === 'ACCEPTEE'
+              ? (demande.typeBourse?.echeances ?? []).map(
+                  (echeance) => echeance.montantAttendu,
+                )
+              : [],
+          paiementsSupplementaires: demande.inscriptions.flatMap(
+            (inscription) => inscription.paiements,
+          ),
+        }),
+      ),
+      ...inscriptions.map((inscription) =>
+        preparer('INSCRIPTION', {
+          id: inscription.id,
+          date: inscription.dateInscription,
+          statutDossier: inscription.statut,
+          anneeScolaire: inscription.anneeScolaire,
+          niveau: inscription.niveau,
+          filiere: inscription.filiere,
+          personne: inscription.personne,
+          elementsDossier: inscription.elementsDossier,
+          paiements: inscription.paiements,
+        }),
+      ),
+    ];
+
+    const texte = query.q?.trim().toLocaleLowerCase('fr-FR');
+    const type =
+      query.type === 'BOURSE' || query.type === 'INSCRIPTION'
+        ? query.type
+        : null;
+    const statut = ['PAYE', 'DETTE', 'IMPAYE'].includes(query.statut ?? '')
+      ? query.statut
+      : null;
+    const filtres = lignes
+      .filter(
+        (ligne) =>
+          Number(ligne.montantAttendu) > 0 || Number(ligne.montantPaye) !== 0,
+      )
+      .filter((ligne) => !type || ligne.type === type)
+      .filter((ligne) => !statut || ligne.etat === statut)
+      .filter(
+        (ligne) =>
+          !query.anneeScolaire || ligne.anneeScolaire === query.anneeScolaire,
+      )
+      .filter(
+        (ligne) =>
+          !texte ||
+          [
+            ligne.personne.nom,
+            ligne.personne.prenom,
+            ligne.personne.telephone,
+            ligne.personne.matricule,
+            ligne.filiere,
+            ligne.niveau,
+          ]
+            .filter(Boolean)
+            .some((valeur) =>
+              valeur!.toLocaleLowerCase('fr-FR').includes(texte),
+            ),
+      )
+      .sort((a, b) => a.personne.nom.localeCompare(b.personne.nom, 'fr'));
+
+    const somme = (
+      liste: typeof filtres,
+      cle: 'montantAttendu' | 'montantPaye' | 'encaisse' | 'resteAPayer',
+    ) =>
+      this.money(liste.reduce((total, ligne) => total + Number(ligne[cle]), 0));
+    const resume = (liste: typeof filtres) => ({
+      dossiers: liste.length,
+      attendu: somme(liste, 'montantAttendu'),
+      paye: somme(liste, 'montantPaye'),
+      encaisse: somme(liste, 'encaisse'),
+      resteAPayer: somme(liste, 'resteAPayer'),
+    });
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 25));
+    return {
+      data: filtres.slice((page - 1) * limit, page * limit),
+      meta: {
+        page,
+        limit,
+        total: filtres.length,
+        totalPages: Math.max(1, Math.ceil(filtres.length / limit)),
+      },
+      totaux: resume(filtres),
+      parType: {
+        bourses: resume(filtres.filter((ligne) => ligne.type === 'BOURSE')),
+        inscriptions: resume(
+          filtres.filter((ligne) => ligne.type === 'INSCRIPTION'),
+        ),
+      },
+      anneesScolaires: annees.map((annee) => annee.anneeScolaire),
+    };
+  }
+
   async dossiersIncomplets() {
     const [demandes, inscriptions] = await Promise.all([
       this.prisma.demandeBourse.findMany({

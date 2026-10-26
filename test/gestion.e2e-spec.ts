@@ -118,6 +118,10 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       comptable: { permissions: droits('accounting') },
       // Agent d'accueil : il scanne les cartes, et rien d'autre.
       accueil: { permissions: ['view:card-scan'] },
+      // Chargée des finances : elle valide la remise de l'argent, sans encaisser.
+      finances: { permissions: droits('payment-validation') },
+      // Encaisse et valide : ne doit jamais valider sa propre caisse.
+      chefFinances: { permissions: droits('payments', 'payment-validation') },
       gestionnaire: { permissions: droits('finance-settings') },
       admin: { role: 'admin', permissions: [] },
     };
@@ -2237,6 +2241,16 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     // Le nouveau niveau apporte ses propres pièces.
     expect(pieces(corrigee.body)).toContain(releve.body.id);
 
+    // Une demande de bourse ne reçoit que des frais de dépôt (compte 7061) :
+    // des « frais d'inscription » y fausseraient la comptabilité (7062).
+    const nature = await api('admin')
+      .post('/paiements', {
+        demandeBourseId: demande.body.id,
+        montant: 1000,
+        typePaiement: 'FRAIS_INSCRIPTION',
+      })
+      .expect(400);
+    expect(nature.body.message).toMatch(/frais de dépôt/i);
     // Une fois de l'argent reçu, le niveau est figé ; le reste se corrige encore.
     await api('admin')
       .post('/paiements', {
@@ -2331,5 +2345,136 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .expect(201);
     const refus = await editer([sansClasse.body.id]).expect(409);
     expect(refus.body.message).toMatch(/matricule/);
+  });
+
+  it('fait valider la remise des encaissements par la chargée des finances', async () => {
+    const aujourdHui = new Date(Date.now() + 3600_000)
+      .toISOString()
+      .slice(0, 10);
+    const demande = await api('admin')
+      .post('/demandes-bourse', {
+        nouvellePersonne: { nom: 'Remise', prenom: 'Etu' },
+        niveauDemande: 'PREMIERE_ANNEE',
+        filiereSouhaitee: 'Informatique',
+      })
+      .expect(201);
+    const encaisser = (qui: string, montant: number, modePaiement?: string) =>
+      api(qui)
+        .post('/paiements', {
+          demandeBourseId: demande.body.id,
+          montant,
+          typePaiement: 'FRAIS_DEPOT',
+          modePaiement,
+        })
+        .expect(201)
+        .then((reponse) => reponse.body.id as string);
+    const especes = await encaisser('scolarite', 3000, 'ESPECES');
+    const mobile = await encaisser('scolarite', 2000, 'MOBILE_MONEY');
+    const lister = (filtres: string) =>
+      api('finances')
+        .get(`/paiements/remises?du=${aujourdHui}&au=${aujourdHui}${filtres}`)
+        .expect(200);
+
+    // Tout encaissement attend d'abord sa validation.
+    const caisse = (await lister('&caissier=scolarite')).body;
+    const ligne = (id: string, liste = caisse.lignes as Body[]) =>
+      liste.find((item) => item.id === id);
+    expect(ligne(especes)).toMatchObject({
+      statutRemise: 'EN_ATTENTE',
+      montant: 3000,
+      caissier: 'scolarite',
+    });
+    expect(ligne(mobile)).toMatchObject({
+      statutRemise: 'EN_ATTENTE',
+      modePaiement: 'MOBILE_MONEY',
+    });
+    expect(caisse.synthese.enAttente.montant).toBeGreaterThanOrEqual(5000);
+    expect(caisse.parCaissier).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          caissier: 'scolarite',
+          jour: aujourdHui,
+          mode: 'ESPECES',
+        }),
+      ]),
+    );
+    // Les filtres : seulement les espèces, seulement ce qui reste à valider.
+    const enEspeces = (await lister('&caissier=scolarite&mode=ESPECES')).body
+      .lignes as Body[];
+    expect(ligne(especes, enEspeces)).toBeDefined();
+    expect(ligne(mobile, enEspeces)).toBeUndefined();
+    expect(
+      (await api('finances').get('/paiements/remises/compteur').expect(200))
+        .body.enAttente,
+    ).toBeGreaterThanOrEqual(2);
+
+    // La caisse ne voit ni ne valide la remise.
+    await api('scolarite').get('/paiements/remises').expect(403);
+    await api('scolarite')
+      .post('/paiements/remises', { ids: [especes], statut: 'VALIDE' })
+      .expect(403);
+
+    // La chargée des finances valide ce qu'elle a reçu, signale ce qui manque.
+    const valide = await api('finances')
+      .post('/paiements/remises', { ids: [especes], statut: 'VALIDE' })
+      .expect(201);
+    expect(valide.body).toEqual({ traites: 1, statut: 'VALIDE' });
+    await api('finances')
+      .post('/paiements/remises', { ids: [mobile], statut: 'NON_RECU' })
+      .expect(400);
+    await api('finances')
+      .post('/paiements/remises', {
+        ids: [mobile],
+        statut: 'NON_RECU',
+        motif: 'Transfert introuvable sur le téléphone',
+      })
+      .expect(201);
+    const apres = (await lister('&caissier=scolarite')).body;
+    expect(ligne(especes, apres.lignes)).toMatchObject({
+      statutRemise: 'VALIDE',
+      remiseTraiteeParNom: 'finances',
+    });
+    expect(ligne(mobile, apres.lignes)).toMatchObject({
+      statutRemise: 'NON_RECU',
+      remiseMotif: 'Transfert introuvable sur le téléphone',
+    });
+    expect(
+      (
+        (await lister('&caissier=scolarite&statut=VALIDE')).body
+          .lignes as Body[]
+      ).every((item) => item.statutRemise === 'VALIDE'),
+    ).toBe(true);
+    // Revenir en arrière demande un motif.
+    await api('finances')
+      .post('/paiements/remises', { ids: [especes], statut: 'EN_ATTENTE' })
+      .expect(400);
+    await api('finances')
+      .post('/paiements/remises', {
+        ids: [especes],
+        statut: 'EN_ATTENTE',
+        motif: 'Validé par erreur',
+      })
+      .expect(201);
+
+    // Personne ne valide sa propre caisse, même avec les deux droits.
+    const sien = await encaisser('chefFinances', 1500);
+    const refus = await api('chefFinances')
+      .post('/paiements/remises', { ids: [sien], statut: 'VALIDE' })
+      .expect(409);
+    expect(refus.body.message).toMatch(/propres encaissements/);
+    // Un encaissement annulé a été rendu : plus rien à remettre.
+    await api('admin')
+      .post(`/paiements/${sien}/annulation`, { motif: 'Saisi par erreur' })
+      .expect(201);
+    await api('finances')
+      .post('/paiements/remises', { ids: [sien], statut: 'VALIDE' })
+      .expect(409);
+    // Une annulation n'est pas un encaissement.
+    const annulation = (
+      (await api('admin').get('/paiements')).body as Body[]
+    ).find((item) => item.annulePaiementId === sien)!;
+    await api('finances')
+      .post('/paiements/remises', { ids: [annulation.id], statut: 'VALIDE' })
+      .expect(409);
   });
 });

@@ -21,6 +21,7 @@ import {
   COMPTE_PRODUIT,
   compteDeCharge,
   controleEcriture,
+  calculerSoldeCompte,
   JOURNAUX,
   LigneSaisie,
   PLAN_COMPTABLE,
@@ -687,15 +688,35 @@ export class ComptabiliteService {
 
   async balance(query: { du?: string; au?: string; exerciceId?: string }) {
     await this.synchroniser();
-    const [comptes, totaux] = await Promise.all([
+    const borne = new Date(query.du ?? '');
+    const exercice =
+      !Number.isNaN(borne.getTime()) || !query.exerciceId
+        ? null
+        : await this.prisma.exerciceBudgetaire.findUnique({
+            where: { id: query.exerciceId },
+            select: { dateDebut: true },
+          });
+    const dateOuverture = !Number.isNaN(borne.getTime())
+      ? borne
+      : exercice?.dateDebut;
+    const [comptes, totaux, ouverture] = await Promise.all([
       this.comptes(),
       this.totaux(query),
+      dateOuverture
+        ? this.totaux({}, dateOuverture)
+        : Promise.resolve(new Map<string, { debit: number; credit: number }>()),
     ]);
     const lignes = comptes
-      .filter((compte) => totaux.has(compte.id))
+      .filter((compte) => totaux.has(compte.id) || ouverture.has(compte.id))
       .map((compte) => {
-        const { debit, credit } = totaux.get(compte.id)!;
-        const solde = roundMoney(debit - credit);
+        const { debit, credit } = totaux.get(compte.id) ?? {
+          debit: 0,
+          credit: 0,
+        };
+        const solde = calculerSoldeCompte(
+          { debit, credit },
+          ouverture.get(compte.id) ?? { debit: 0, credit: 0 },
+        );
         return {
           compteId: compte.id,
           numero: compte.numero,
@@ -703,8 +724,7 @@ export class ComptabiliteService {
           classe: compte.classe,
           debit: roundMoney(debit),
           credit: roundMoney(credit),
-          soldeDebiteur: solde > 0 ? solde : 0,
-          soldeCrediteur: solde < 0 ? -solde : 0,
+          ...solde,
         };
       });
     const somme = (
@@ -766,6 +786,8 @@ export class ComptabiliteService {
   // Compte de résultat et bilan simplifié.
   async etats(query: { du?: string; au?: string; exerciceId?: string }) {
     const { lignes } = await this.balance(query);
+    const soldeMouvement = (ligne: (typeof lignes)[number]) =>
+      ligne.soldeMouvement;
     const solde = (ligne: (typeof lignes)[number]) =>
       ligne.soldeDebiteur - ligne.soldeCrediteur;
     const charges = lignes
@@ -773,14 +795,14 @@ export class ComptabiliteService {
       .map((ligne) => ({
         numero: ligne.numero,
         libelle: ligne.libelle,
-        montant: solde(ligne),
+        montant: soldeMouvement(ligne),
       }));
     const produits = lignes
       .filter((ligne) => ligne.classe === 7)
       .map((ligne) => ({
         numero: ligne.numero,
         libelle: ligne.libelle,
-        montant: -solde(ligne),
+        montant: -soldeMouvement(ligne),
       }));
     const total = (liste: Array<{ montant: number }>) =>
       roundMoney(liste.reduce((somme, item) => somme + item.montant, 0));

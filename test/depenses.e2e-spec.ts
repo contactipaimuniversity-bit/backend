@@ -144,6 +144,26 @@ suite('Circuit de dépense (e2e)', () => {
     categorieId = (categories.body as Body[]).find(
       (item) => item.livraisonRequise,
     )!.id;
+    // Chaque catégorie affiche le compte de charge réellement utilisé.
+    const fournitures = (categories.body as Body[]).find((item) =>
+      /fourniture/i.test(item.nom),
+    )!;
+    expect(fournitures).toMatchObject({
+      compteNumero: null,
+      compteApplique: '6047',
+    });
+    // Seul un compte de charge (6) ou d'immobilisation (2) du plan est accepté.
+    const choisir = (compteNumero: string) =>
+      api('gestionnaire').patch(`/finances/categories/${fournitures.id}`, {
+        compteNumero,
+      });
+    await choisir('999999').expect(400);
+    await choisir('571').expect(400);
+    await choisir('6047').expect(200);
+    const relues = await api('demandeur').get('/finances/categories');
+    expect(
+      (relues.body as Body[]).find((item) => item.id === fournitures.id),
+    ).toMatchObject({ compteNumero: '6047', compteApplique: '6047' });
 
     await api('demandeur')
       .patch('/finances/parametres', { budgetBloquant: false })

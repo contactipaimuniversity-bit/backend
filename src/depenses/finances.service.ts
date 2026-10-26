@@ -7,6 +7,7 @@ import {
 import { isUniqueConstraintViolation } from '../common/prisma-errors';
 import { PrismaService } from '../prisma/prisma.service';
 import { ComptabiliteService } from '../comptabilite/comptabilite.service';
+import { compteDeCharge } from '../comptabilite/plan-comptable';
 import {
   montantRetenu,
   parseDate,
@@ -127,9 +128,45 @@ export class FinancesService {
 
   // ---------- Catégories ----------
 
+  // Chaque catégorie avec le compte de charge réellement utilisé en comptabilité :
+  // celui choisi, ou à défaut celui déduit de son nom (affiché pour être vérifié).
   async categories() {
     await this.parametres();
-    return this.prisma.categorieDepense.findMany({ orderBy: { nom: 'asc' } });
+    const [categories, comptes] = await Promise.all([
+      this.prisma.categorieDepense.findMany({ orderBy: { nom: 'asc' } }),
+      // Le plan comptable de départ est créé s'il ne l'est pas encore.
+      this.comptabilite.comptes(),
+    ]);
+    const libelles = new Map(
+      comptes.map((compte) => [compte.numero, compte.libelle]),
+    );
+    return categories.map((categorie) => {
+      const compteApplique = compteDeCharge(categorie);
+      return {
+        ...categorie,
+        compteApplique,
+        compteAppliqueLibelle: libelles.get(compteApplique) ?? null,
+      };
+    });
+  }
+
+  // Un compte de charge doit exister au plan comptable, en classe 6 (charges)
+  // ou 2 (immobilisations, pour un équipement durable).
+  private async compteDeChargeValide(valeur: unknown) {
+    const numero = texteOptionnel(valeur, 12);
+    if (!numero) return null;
+    const compte = (await this.comptabilite.comptes()).find(
+      (item) => item.numero === numero,
+    );
+    if (!compte || !compte.actif)
+      throw new BadRequestException(
+        `Le compte ${numero} n'existe pas au plan comptable : ajoutez-le d'abord dans Comptabilité › Plan comptable`,
+      );
+    if (compte.classe !== 6 && compte.classe !== 2)
+      throw new BadRequestException(
+        `Le compte ${numero} n'est pas un compte de charge (classe 6) ni d'immobilisation (classe 2)`,
+      );
+    return numero;
   }
 
   async createCategorie(body: { nom?: unknown; livraisonRequise?: unknown }) {
@@ -171,7 +208,11 @@ export class FinancesService {
             ? { livraisonRequise: body.livraisonRequise === true }
             : {}),
           ...(body.compteNumero !== undefined
-            ? { compteNumero: texteOptionnel(body.compteNumero, 12) }
+            ? {
+                compteNumero: await this.compteDeChargeValide(
+                  body.compteNumero,
+                ),
+              }
             : {}),
           ...(body.actif !== undefined ? { actif: body.actif === true } : {}),
         },

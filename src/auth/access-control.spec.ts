@@ -112,6 +112,22 @@ describe('requiredPermissionForRequest', () => {
     ).toEqual(['edit:finance-settings']);
   });
 
+  it('reserves the cash handover validation to its own right', () => {
+    expect(requiredPermissionForRequest('/paiements/remises', 'GET')).toEqual([
+      'view:payment-validation',
+    ]);
+    expect(requiredPermissionForRequest('/paiements/remises', 'POST')).toEqual([
+      'edit:payment-validation',
+    ]);
+    expect(
+      requiredPermissionForRequest('/paiements/remises/compteur', 'GET'),
+    ).toEqual(['view:payment-validation']);
+    // Encaisser ne donne pas le droit de valider.
+    expect(requiredPermissionForRequest('/paiements', 'POST')).toEqual([
+      'edit:payments',
+    ]);
+  });
+
   it('lets the entrance staff scan cards without editing them', () => {
     expect(requiredPermissionForRequest('/cartes/scan', 'GET')).toEqual([
       'view:card-scan',
@@ -137,5 +153,11 @@ describe('requiredPermissionForRequest', () => {
     expect(
       requiredPermissionForRequest('/rapports/paiements-en-retard', 'GET'),
     ).toEqual(['view:reports', 'view:payments']);
+  });
+
+  it('shows the student receivables report to accounting, report, or payment users', () => {
+    expect(
+      requiredPermissionForRequest('/rapports/recouvrement', 'GET'),
+    ).toEqual(['view:accounting', 'view:reports', 'view:payments']);
   });
 });

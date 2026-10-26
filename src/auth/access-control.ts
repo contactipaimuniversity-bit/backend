@@ -26,6 +26,7 @@ export const ACCESS_AREAS = [
   'payroll-approval',
   'accounting',
   'card-scan',
+  'payment-validation',
 ] as const;
 
 // Tous les acteurs du circuit de dépense lisent les mêmes données ; le service
@@ -59,6 +60,8 @@ export function requiredPermissionForRequest(
     return ['view:dashboard'];
   if (isRead && normalizedPath === '/rapports/paiements-en-retard')
     return ['view:reports', 'view:payments'];
+  if (isRead && normalizedPath === '/rapports/recouvrement')
+    return ['view:accounting', 'view:reports', 'view:payments'];
   // La liste des personnes sert à choisir le candidat d'un nouveau dossier ;
   // la fiche d'une personne réunit ses dossiers et ce qu'elle a payé, au guichet.
   if (
@@ -99,6 +102,12 @@ export function requiredPermissionForRequest(
     /^\/(demandes-bourse|inscriptions)\/[^/]+\/paiements$/.test(normalizedPath)
   )
     return ['view:payments'];
+  // Valider la remise des encaissements : rôle de la chargée des finances.
+  if (
+    normalizedPath === '/paiements/remises' ||
+    normalizedPath === '/paiements/remises/compteur'
+  )
+    return isRead ? ['view:payment-validation'] : ['edit:payment-validation'];
   // Annuler un encaissement est un droit à part : encaisser ne suffit pas.
   if (!isRead && /^\/paiements\/[^/]+\/annulation$/.test(normalizedPath))
     return ['edit:payment-cancellation'];

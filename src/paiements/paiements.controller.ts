@@ -21,11 +21,45 @@ import { AnnulerPaiementDto } from './dto/annuler-paiement.dto';
 import { CreatePaiementDto } from './dto/create-paiement.dto';
 import { AssignPaiementDto } from './dto/assign-paiement.dto';
 import { PaiementsService } from './paiements.service';
+import { RemisesService } from './remises.service';
 
 @Controller()
 @UseGuards(JwtAuthGuard)
 export class PaiementsController {
-  constructor(private readonly paiementsService: PaiementsService) {}
+  constructor(
+    private readonly paiementsService: PaiementsService,
+    private readonly remises: RemisesService,
+  ) {}
+
+  // Remise des encaissements à la chargée des finances.
+  @Get('paiements/remises')
+  remisesListe(
+    @Query()
+    filtres: {
+      du?: string;
+      au?: string;
+      caissier?: string;
+      mode?: string;
+      statut?: string;
+      type?: string;
+      q?: string;
+    },
+  ) {
+    return this.remises.liste(filtres);
+  }
+
+  @Get('paiements/remises/compteur')
+  remisesCompteur() {
+    return this.remises.compteur();
+  }
+
+  @Post('paiements/remises')
+  remisesTraiter(
+    @Body() body: Record<string, unknown>,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.remises.traiter(body, acteurDe(request));
+  }
 
   @Post('paiements')
   create(
@@ -36,6 +70,7 @@ export class PaiementsController {
       createDto,
       saisieLocale(request),
       acteurDe(request).nom,
+      acteurDe(request).id,
     );
   }
 

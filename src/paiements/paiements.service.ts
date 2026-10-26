@@ -37,6 +37,7 @@ export class PaiementsService {
     createDto: CreatePaiementDto,
     saisie: SaisieLocale = {},
     auteur: string | null = null,
+    auteurId: string | null = null,
   ) {
     // Paiement saisi hors ligne et déjà reçu : on le renvoie tel quel, sans
     // jamais l'encaisser une seconde fois.
@@ -98,9 +99,16 @@ export class PaiementsService {
       );
     }
 
+    // La nature des frais suit le dossier : elle décide du compte de produit
+    // (7061 frais de dépôt, 7062 frais d'inscription) en comptabilité.
     if (typePaiement === 'FRAIS_DEPOT' && resolvedInscriptionId) {
       throw new BadRequestException(
         'Une inscription ne peut pas recevoir de frais de dépôt',
+      );
+    }
+    if (typePaiement === 'FRAIS_INSCRIPTION' && resolvedDemandeBourseId) {
+      throw new BadRequestException(
+        "Une demande de bourse ne reçoit pas de frais d'inscription : choisissez « Frais de dépôt » (ou une échéance de bourse)",
       );
     }
     if (typePaiement === 'ECHEANCE_BOURSE' && !echeanceId) {
@@ -170,6 +178,7 @@ export class PaiementsService {
           typePaiement,
           modePaiement,
           saisiParNom: auteur,
+          saisiParId: auteurId,
           numeroRecu: await numeroRecu(transaction),
           ...(saisie.id ? { id: saisie.id } : {}),
           ...(saisie.date ? { datePaiement: saisie.date } : {}),
@@ -244,6 +253,8 @@ export class PaiementsService {
     saisiParNom: string | null;
     modePaiement: string | null;
     numeroRecu: string | null;
+    statutRemise?: string;
+    remiseTraiteeParNom?: string | null;
     demandeBourseId: string | null;
     inscriptionId: string | null;
     echeanceId: string | null;
@@ -263,6 +274,9 @@ export class PaiementsService {
       saisiParNom: payment.saisiParNom,
       modePaiement: payment.modePaiement ?? 'ESPECES',
       numeroRecu: payment.numeroRecu,
+      // Remise à la chargée des finances (encaissements seulement).
+      statutRemise: payment.statutRemise ?? null,
+      remiseTraiteeParNom: payment.remiseTraiteeParNom ?? null,
       dossierId: payment.demandeBourseId ?? payment.inscriptionId,
       dossierType: payment.demandeBourseId ? 'demande-bourse' : 'inscription',
       dossier: payment.demandeBourse

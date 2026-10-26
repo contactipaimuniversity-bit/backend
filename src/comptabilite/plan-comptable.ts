@@ -106,6 +106,23 @@ export type LigneSaisie = {
   libelle?: string | null;
 };
 
+export function calculerSoldeCompte(
+  mouvements: { debit: number; credit: number },
+  ouverture: { debit: number; credit: number },
+) {
+  const enCentimes = (value: number) => Math.round(value * 100);
+  const enUnites = (value: number) => value / 100;
+  const soldeMouvement =
+    enCentimes(mouvements.debit) - enCentimes(mouvements.credit);
+  const solde =
+    enCentimes(ouverture.debit) - enCentimes(ouverture.credit) + soldeMouvement;
+  return {
+    soldeMouvement: enUnites(soldeMouvement),
+    soldeDebiteur: solde > 0 ? enUnites(solde) : 0,
+    soldeCrediteur: solde < 0 ? enUnites(-solde) : 0,
+  };
+}
+
 const centimes = (value: number) => Math.round(value * 100);
 
 // Une écriture est équilibrée, et chaque ligne est soit au débit, soit au crédit.

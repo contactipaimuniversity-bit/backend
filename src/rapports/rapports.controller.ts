@@ -18,6 +18,21 @@ export class RapportsController {
     return this.rapportsService.paiementsEnRetard();
   }
 
+  @Get('recouvrement')
+  recouvrement(
+    @Query()
+    query: {
+      type?: string;
+      statut?: string;
+      anneeScolaire?: string;
+      q?: string;
+      page?: string;
+      limit?: string;
+    },
+  ) {
+    return this.rapportsService.recouvrement(query);
+  }
+
   @Get('synthese')
   synthese() {
     return this.rapportsService.synthese();

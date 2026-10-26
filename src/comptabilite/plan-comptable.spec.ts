@@ -1,4 +1,5 @@
 import {
+  calculerSoldeCompte,
   compteDeCharge,
   controleEcriture,
   regrouper,
@@ -76,5 +77,15 @@ describe('règles comptables', () => {
     expect(
       compteDeCharge({ nom: 'Fournitures de bureau', compteNumero: '604' }),
     ).toBe('604');
+  });
+
+  it('calcule le solde à date en ajoutant les mouvements au report d’ouverture', () => {
+    expect(
+      calculerSoldeCompte({ debit: 25, credit: 40 }, { debit: 500, credit: 0 }),
+    ).toEqual({
+      soldeMouvement: -15,
+      soldeDebiteur: 485,
+      soldeCrediteur: 0,
+    });
   });
 });

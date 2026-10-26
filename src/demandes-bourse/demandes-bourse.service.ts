@@ -184,6 +184,7 @@ export class DemandesBourseService {
               createDto.preparation?.modePaiement,
             ),
             saisiParNom: await nomUtilisateur(transaction, creeParId),
+            saisiParId: creeParId,
             numeroRecu: await numeroRecu(transaction),
             ...(dateSaisie ? { datePaiement: dateSaisie } : {}),
           },
@@ -242,13 +243,13 @@ export class DemandesBourseService {
       );
     }
     const requestedType = preparation?.typePaiement?.trim().toUpperCase();
-    if (
-      requestedType !== 'FRAIS_DEPOT' &&
-      requestedType !== 'FRAIS_INSCRIPTION'
-    ) {
-      throw new BadRequestException('Le type de paiement est invalide');
+    // Une demande de bourse ne se règle qu'en frais de dépôt (compte 7061).
+    if (requestedType !== 'FRAIS_DEPOT') {
+      throw new BadRequestException(
+        "Une demande de bourse ne se règle qu'en frais de dépôt",
+      );
     }
-    const typePaiement: 'FRAIS_DEPOT' | 'FRAIS_INSCRIPTION' = requestedType;
+    const typePaiement = 'FRAIS_DEPOT' as const;
     return {
       elementId,
       montant: amount.toFixed(2),

@@ -188,6 +188,7 @@ export class InscriptionsService {
               createDto.preparation?.modePaiement,
             ),
             saisiParNom: await nomUtilisateur(transaction, creeParId),
+            saisiParId: creeParId,
             numeroRecu: await numeroRecu(transaction),
             ...(dateSaisie ? { datePaiement: dateSaisie } : {}),
           },

@@ -457,7 +457,19 @@ model Paiement {
   // Heure de réception par le serveur (la date métier peut être celle d'une saisie hors ligne).
   enregistreLe DateTime @default(now())
 
+  // Qui a encaissé (l'identifiant sert à interdire de valider son propre argent).
+  saisiParId          String?
+  // Remise de l'argent à la chargée des finances : EN_ATTENTE, VALIDE ou NON_RECU.
+  // Ne concerne que les encaissements (frais et échéances), pas les reports,
+  // remboursements ni annulations.
+  statutRemise        String    @default("EN_ATTENTE")
+  remiseTraiteeLe     DateTime?
+  remiseTraiteeParId  String?
+  remiseTraiteeParNom String?
+  remiseMotif         String?
+
   @@index([enregistreLe])
+  @@index([statutRemise, datePaiement])
   @@map("paiements")
 }
 
