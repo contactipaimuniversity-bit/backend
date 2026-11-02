@@ -2794,6 +2794,23 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .expect(403);
   });
 
+  it('donne en un appel le même solde que la fiche de chaque inscription', async () => {
+    const soldes = await api('admin').get('/inscriptions/soldes').expect(200);
+    expect(soldes.body.length).toBeGreaterThan(0);
+    for (const solde of soldes.body.slice(0, 5)) {
+      const fiche = await api('admin')
+        .get(`/inscriptions/${solde.inscriptionId}/finance`)
+        .expect(200);
+      expect(Number(solde.montantAttenduCumule)).toBe(
+        Number(fiche.body.totalAttendu),
+      );
+      expect(Number(solde.montantPayeCumule)).toBe(
+        Number(fiche.body.totalPaye),
+      );
+    }
+    await api('rh').get('/inscriptions/soldes').expect(403);
+  });
+
   it('liste les boursiers par type de bourse, inscrits ou non, avec leur téléphone', async () => {
     const type = await api('admin')
       .post('/types-bourse', { nom: 'Bourse liste', fraisInscription: 0 })

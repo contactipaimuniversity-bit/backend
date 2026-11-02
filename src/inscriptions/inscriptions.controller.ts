@@ -42,6 +42,12 @@ export class InscriptionsController {
     return this.inscriptionsService.findAll(search);
   }
 
+  // Avant les routes :id : ce mot ne doit pas être lu comme un identifiant.
+  @Get('soldes')
+  soldes() {
+    return this.inscriptionsService.soldes();
+  }
+
   @Delete(':id')
   remove(
     @Param('id') id: string,

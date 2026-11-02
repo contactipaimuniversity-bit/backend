@@ -47,6 +47,12 @@ describe('requiredPermissionForRequest', () => {
     ).toEqual(['view:scholarships', 'view:certificates', 'view:payments']);
   });
 
+  it('opens the enrollment balances to the certificate desk', () => {
+    expect(requiredPermissionForRequest('/inscriptions/soldes', 'GET')).toEqual(
+      ['view:enrollments', 'view:certificates', 'view:payments'],
+    );
+  });
+
   it('opens the session profile to every signed-in user', () => {
     expect(requiredPermissionForRequest('/auth/me', 'GET')).toBeNull();
   });

@@ -595,6 +595,105 @@ export class InscriptionsService {
     });
   }
 
+  // Le solde de toutes les inscriptions en cours, d'un seul appel : même calcul que
+  // findFinance, pour la page des certificats (une requête par dossier était trop lente).
+  async soldes() {
+    const select = {
+      id: true,
+      niveau: true,
+      elementsDossier: {
+        select: {
+          elementRequisId: true,
+          montantAttendu: true,
+          elementRequis: {
+            select: { categorie: true, contexte: true, niveauApplicable: true },
+          },
+          paiements: { select: { montant: true } },
+        },
+      },
+    } as const;
+    const lire = () =>
+      this.prisma.inscription.findMany({
+        where: { statut: { not: 'ABANDONNEE' } },
+        select,
+      });
+    const [inscriptions, catalogue] = await Promise.all([
+      lire(),
+      this.prisma.elementRequis.findMany({
+        where: { contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] } },
+        select: { id: true, niveauApplicable: true },
+      }),
+    ]);
+    // Seuls les dossiers à compléter passent par la mise à jour habituelle.
+    const applicables = new Map<string, $Enums.NiveauApplicable[]>();
+    const aCompleter: string[] = [];
+    for (const inscription of inscriptions) {
+      if (!applicables.has(inscription.niveau))
+        applicables.set(
+          inscription.niveau,
+          (await this.niveauApplicable(inscription.niveau)).in,
+        );
+      const niveaux = applicables.get(inscription.niveau)!;
+      const presents = new Set(
+        inscription.elementsDossier.map((element) => element.elementRequisId),
+      );
+      const manque = catalogue.some(
+        (element) =>
+          niveaux.includes(element.niveauApplicable) &&
+          !presents.has(element.id),
+      );
+      const horsNiveau = inscription.elementsDossier.some(
+        (element) =>
+          element.elementRequis.categorie === 'FRAIS' &&
+          element.elementRequis.contexte === 'INSCRIPTION_DIRECTE' &&
+          !niveaux.includes(element.elementRequis.niveauApplicable),
+      );
+      if (manque || horsNiveau) aCompleter.push(inscription.id);
+    }
+    for (const id of aCompleter) await this.ensureElementsForDossier(id);
+    const [finales, nonAffectes] = await Promise.all([
+      aCompleter.length ? lire() : inscriptions,
+      this.prisma.paiement.groupBy({
+        by: ['inscriptionId'],
+        where: {
+          inscriptionId: { in: inscriptions.map((item) => item.id) },
+          elementDossierId: null,
+          echeanceId: null,
+          ...HORS_SCOLARITE,
+        },
+        _sum: { montant: true },
+      }),
+    ]);
+    const nonAffecteDe = new Map(
+      nonAffectes.map((item) => [
+        item.inscriptionId,
+        Number(item._sum.montant ?? 0),
+      ]),
+    );
+    return finales.map((inscription) => {
+      const attendu = inscription.elementsDossier.reduce(
+        (total, element) => total + Number(element.montantAttendu ?? 0),
+        0,
+      );
+      const paye =
+        inscription.elementsDossier.reduce(
+          (total, element) =>
+            total +
+            element.paiements.reduce(
+              (somme, paiement) => somme + Number(paiement.montant),
+              0,
+            ),
+          0,
+        ) + (nonAffecteDe.get(inscription.id) ?? 0);
+      return {
+        inscriptionId: inscription.id,
+        montantAttenduCumule: this.money(attendu),
+        montantPayeCumule: this.money(paye),
+        resteAPayer: this.money(attendu - paye),
+      };
+    });
+  }
+
   async findFinance(id: string) {
     await this.ensureExists(id);
     await this.ensureElementsForDossier(id);
