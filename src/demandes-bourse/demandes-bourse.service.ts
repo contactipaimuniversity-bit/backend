@@ -257,6 +257,60 @@ export class DemandesBourseService {
     };
   }
 
+  // Les étudiants qui ont obtenu une bourse, inscrits ou non, avec de quoi les joindre.
+  async boursiers(rawTypeBourseId?: string, rawInscription?: string) {
+    const typeBourseId = this.optionalString(rawTypeBourseId);
+    const demandes = await this.prisma.demandeBourse.findMany({
+      where: {
+        statut: 'ACCEPTEE',
+        typeBourseId: typeBourseId ?? { not: null },
+      },
+      select: {
+        id: true,
+        niveauDemande: true,
+        filiereSouhaitee: true,
+        dateDecision: true,
+        typeBourse: { select: { nom: true } },
+        personne: {
+          select: {
+            nom: true,
+            prenom: true,
+            telephone: true,
+            matricule: true,
+            quartier: true,
+            tuteurTelephone: true,
+          },
+        },
+        inscriptions: {
+          where: { statut: { not: 'ABANDONNEE' } },
+          select: {
+            id: true,
+            anneeScolaire: true,
+            niveau: true,
+            filiere: true,
+            dateInscription: true,
+          },
+          orderBy: { dateInscription: 'desc' },
+          take: 1,
+        },
+      },
+      orderBy: [{ personne: { nom: 'asc' } }, { personne: { prenom: 'asc' } }],
+    });
+    const inscrits = rawInscription === 'INSCRITS';
+    const nonInscrits = rawInscription === 'NON_INSCRITS';
+    return demandes
+      .filter(
+        (demande) =>
+          (!inscrits && !nonInscrits) ||
+          demande.inscriptions.length > 0 === inscrits,
+      )
+      .map(({ inscriptions, typeBourse, ...demande }) => ({
+        ...demande,
+        typeBourse: typeBourse?.nom ?? '',
+        inscription: inscriptions[0] ?? null,
+      }));
+  }
+
   async findAll(search: SearchDemandesBourseDto) {
     const page = this.parsePagination(search.page, 1);
     const limit = this.parsePagination(search.limit, 20, 100);

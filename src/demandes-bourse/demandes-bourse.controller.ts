@@ -44,6 +44,15 @@ export class DemandesBourseController {
     return this.demandesBourseService.findAll(search);
   }
 
+  // Avant les routes :id : ce mot ne doit pas être lu comme un identifiant.
+  @Get('boursiers')
+  boursiers(
+    @Query('typeBourseId') typeBourseId?: string,
+    @Query('inscription') inscription?: string,
+  ) {
+    return this.demandesBourseService.boursiers(typeBourseId, inscription);
+  }
+
   @Delete(':id')
   remove(
     @Param('id') id: string,

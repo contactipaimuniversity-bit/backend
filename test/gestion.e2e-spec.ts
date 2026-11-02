@@ -2794,6 +2794,67 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .expect(403);
   });
 
+  it('liste les boursiers par type de bourse, inscrits ou non, avec leur téléphone', async () => {
+    const type = await api('admin')
+      .post('/types-bourse', { nom: 'Bourse liste', fraisInscription: 0 })
+      .expect(201);
+    const accepter = async (nom: string, telephone?: string) => {
+      const demande = await api('admin')
+        .post('/demandes-bourse', {
+          nouvellePersonne: { nom, prenom: 'Liste', telephone },
+          niveauDemande: 'PREMIERE_ANNEE',
+          filiereSouhaitee: 'Informatique',
+        })
+        .expect(201);
+      await api('admin')
+        .patch(`/demandes-bourse/${demande.body.id}/decision`, {
+          statut: 'ACCEPTEE',
+          typeBourseId: type.body.id,
+        })
+        .expect(200);
+      return demande.body.id as string;
+    };
+    const inscrit = await accepter('Inscrit', '066000001');
+    await accepter('Attente');
+    await api('admin')
+      .post('/inscriptions', {
+        viaBourse: true,
+        demandeBourseId: inscrit,
+        anneeScolaire: libelleAnnee,
+        niveau: 'L1',
+        filiere: 'Informatique',
+      })
+      .expect(201);
+    const liste = async (filtres: string) =>
+      (
+        await api('admin')
+          .get(
+            `/demandes-bourse/boursiers?typeBourseId=${type.body.id}${filtres}`,
+          )
+          .expect(200)
+      ).body;
+
+    const tous = await liste('');
+    expect(tous.map((item: Body) => item.personne.nom)).toEqual([
+      'Attente',
+      'Inscrit',
+    ]);
+    expect(tous[0].inscription).toBeNull();
+    const inscrits = await liste('&inscription=INSCRITS');
+    expect(inscrits).toHaveLength(1);
+    expect(inscrits[0].personne.telephone).toBe('066000001');
+    expect(inscrits[0].inscription.anneeScolaire).toBe(libelleAnnee);
+    expect(inscrits[0].typeBourse).toBe('Bourse liste');
+    const attente = await liste('&inscription=NON_INSCRITS');
+    expect(attente.map((item: Body) => item.personne.nom)).toEqual(['Attente']);
+    // Un autre type de bourse ne les montre pas, et le droit reste exigé.
+    const autres = await api('admin')
+      .get('/demandes-bourse/boursiers?typeBourseId=aucun')
+      .expect(200);
+    expect(autres.body).toEqual([]);
+    await api('rh').get('/demandes-bourse/boursiers').expect(403);
+  });
+
   it('ne donne à chacun que les cartes de la Vue d’ensemble attribuées à son poste', async () => {
     const compte = await api('admin')
       .post('/utilisateurs', {

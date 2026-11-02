@@ -41,6 +41,12 @@ describe('requiredPermissionForRequest', () => {
     ).toEqual(['edit:scholarships']);
   });
 
+  it('opens the scholars list to those who see the scholarship files', () => {
+    expect(
+      requiredPermissionForRequest('/demandes-bourse/boursiers', 'GET'),
+    ).toEqual(['view:scholarships', 'view:certificates', 'view:payments']);
+  });
+
   it('opens the session profile to every signed-in user', () => {
     expect(requiredPermissionForRequest('/auth/me', 'GET')).toBeNull();
   });
