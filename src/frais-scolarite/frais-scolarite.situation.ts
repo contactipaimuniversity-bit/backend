@@ -310,61 +310,166 @@ export async function situationScolarite(
   };
 }
 
-// Ce qui est échu et non soldé, pour un étudiant ou pour tous.
+// Toutes les situations d'un coup, pour les rapports : une poignée de requêtes,
+// quel que soit le nombre d'étudiants (les rapports s'ouvrent à chaque accueil).
+async function toutesLesSituations(prisma: PrismaService) {
+  await assurerTousLesEcheanciers(prisma);
+  const [lignes, verses, inscriptions] = await Promise.all([
+    prisma.ligneScolarite.findMany({
+      where: { inscription: { statut: { not: 'ABANDONNEE' } } },
+      select: {
+        id: true,
+        inscriptionId: true,
+        type: true,
+        libelle: true,
+        dateLimite: true,
+        ordre: true,
+        montant: true,
+        paiements: { select: { montant: true } },
+      },
+    }),
+    prisma.paiement.groupBy({
+      by: ['inscriptionId'],
+      where: { typePaiement: 'MENSUALITE', annulation: { is: null } },
+      _sum: { montant: true },
+    }),
+    prisma.inscription.findMany({
+      where: { statut: { not: 'ABANDONNEE' }, lignesScolarite: { some: {} } },
+      select: {
+        id: true,
+        reductionIndividuelle: true,
+        echeancierPersonnalise: true,
+        bourseRetireeLe: true,
+        demandeBourse: {
+          select: { statut: true, typeBourse: { select: { nom: true } } },
+        },
+      },
+    }),
+  ]);
+  const verseDe = new Map(
+    verses.map((item) => [item.inscriptionId, Number(item._sum.montant ?? 0)]),
+  );
+  return inscriptions.map((inscription) => {
+    const siennes = lignes.filter(
+      (ligne) => ligne.inscriptionId === inscription.id,
+    );
+    const mensualites = repartir(
+      siennes
+        .filter((ligne) => ligne.type === 'MENSUALITE')
+        .map((ligne) => ({
+          libelle: ligne.libelle,
+          dateLimite: ligne.dateLimite,
+          ordre: ligne.ordre,
+          montant: Number(ligne.montant),
+        })),
+      verseDe.get(inscription.id) ?? 0,
+    );
+    const annexes = siennes
+      .filter((ligne) => ligne.type === 'ANNEXE')
+      .map((ligne) => {
+        const montant = Number(ligne.montant);
+        const paye = arrondir(
+          ligne.paiements.reduce(
+            (total, paiement) => total + Number(paiement.montant),
+            0,
+          ),
+        );
+        return {
+          libelle: ligne.libelle,
+          dateLimite: ligne.dateLimite,
+          ordre: ligne.ordre,
+          montant,
+          paye,
+          reste: arrondir(Math.max(0, montant - paye)),
+        };
+      });
+    const toutes = [...mensualites, ...annexes];
+    const demande = inscription.demandeBourse;
+    const bourse =
+      !inscription.bourseRetireeLe && demande?.statut === 'ACCEPTEE'
+        ? demande.typeBourse
+        : null;
+    return {
+      inscriptionId: inscription.id,
+      regime: regimeDe({
+        bourse,
+        reductionIndividuelle:
+          inscription.reductionIndividuelle === null
+            ? null
+            : Number(inscription.reductionIndividuelle),
+        bourseRetiree: inscription.bourseRetireeLe !== null,
+        personnalise: inscription.echeancierPersonnalise,
+      }),
+      lignes: toutes,
+      resteTotal: arrondir(
+        toutes.reduce((total, ligne) => total + ligne.reste, 0),
+      ),
+    };
+  });
+}
+
+// Ce qui est échu et non soldé, pour tous les étudiants.
 export async function retardsScolarite(
   prisma: PrismaService,
   maintenant = new Date(),
 ) {
-  await assurerTousLesEcheanciers(prisma);
-  const inscriptions = await prisma.inscription.findMany({
-    where: {
-      statut: { not: 'ABANDONNEE' },
-      lignesScolarite: { some: {} },
-    },
-    select: { id: true },
-  });
-  const retards: Array<{
-    inscriptionId: string;
-    regime: string;
-    echues: Array<{
-      libelle: string;
-      dateLimite: Date | null;
-      montant: number;
-      paye: number;
-      reste: number;
-    }>;
-    resteEchu: number;
-    resteTotal: number;
-  }> = [];
-  for (const { id } of inscriptions) {
-    const situation = await situationScolarite(prisma, id);
-    if (!situation) continue;
-    const echues = [...situation.mensualites, ...situation.annexes].filter(
+  return (await toutesLesSituations(prisma)).flatMap((situation) => {
+    const echues = situation.lignes.filter(
       (ligne) =>
         ligne.reste > 0 &&
         ligne.dateLimite !== null &&
         ligne.dateLimite < maintenant,
     );
-    if (echues.length)
-      retards.push({
-        inscriptionId: id,
-        regime: situation.regime,
-        echues,
-        resteEchu: arrondir(
-          echues.reduce((total, ligne) => total + ligne.reste, 0),
-        ),
-        resteTotal: situation.resteTotal,
-      });
-  }
-  return retards;
+    return echues.length
+      ? [
+          {
+            inscriptionId: situation.inscriptionId,
+            regime: situation.regime,
+            echues,
+            resteEchu: arrondir(
+              echues.reduce((total, ligne) => total + ligne.reste, 0),
+            ),
+            resteTotal: situation.resteTotal,
+          },
+        ]
+      : [];
+  });
 }
 
+// Seuls les dossiers qui peuvent vraiment recevoir un échéancier sont traités :
+// sans calendrier ni tarif, rien n'est à créer et aucune écriture n'est tentée.
 export async function assurerTousLesEcheanciers(prisma: PrismaService) {
+  const [mois, tarifs] = await Promise.all([
+    prisma.moisScolarite.findMany({
+      distinct: ['anneeScolaire'],
+      select: { anneeScolaire: true },
+    }),
+    prisma.tarifScolarite.findMany({
+      distinct: ['niveau'],
+      select: { niveau: true },
+    }),
+  ]);
   const sansLignes = await prisma.inscription.findMany({
     where: {
       statut: { not: 'ABANDONNEE' },
       echeancierPersonnalise: false,
       lignesScolarite: { none: { type: 'MENSUALITE' } },
+      OR: [
+        {
+          anneeScolaire: { in: mois.map((item) => item.anneeScolaire) },
+          niveau: { in: tarifs.map((item) => item.niveau) },
+        },
+        {
+          bourseRetireeLe: null,
+          demandeBourse: {
+            statut: 'ACCEPTEE',
+            typeBourse: {
+              modeScolarite: 'MOIS_FIXES',
+              echeances: { some: {} },
+            },
+          },
+        },
+      ],
     },
     select: { id: true },
   });
@@ -373,15 +478,10 @@ export async function assurerTousLesEcheanciers(prisma: PrismaService) {
 
 // Reste à recouvrer sur toute la scolarité (bourses et inscriptions ont le leur).
 export async function resteTotalScolarite(prisma: PrismaService) {
-  await assurerTousLesEcheanciers(prisma);
-  const inscriptions = await prisma.inscription.findMany({
-    where: { statut: { not: 'ABANDONNEE' }, lignesScolarite: { some: {} } },
-    select: { id: true },
-  });
-  let total = 0;
-  for (const { id } of inscriptions) {
-    const situation = await situationScolarite(prisma, id);
-    total += situation?.resteTotal ?? 0;
-  }
-  return arrondir(total);
+  return arrondir(
+    (await toutesLesSituations(prisma)).reduce(
+      (total, situation) => total + situation.resteTotal,
+      0,
+    ),
+  );
 }
