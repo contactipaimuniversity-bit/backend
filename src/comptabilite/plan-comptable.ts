@@ -71,6 +71,8 @@ export const COMPTE_PRODUIT: Record<string, string> = {
   FRAIS_DEPOT: '7061',
   FRAIS_INSCRIPTION: '7062',
   ECHEANCE_BOURSE: '7063',
+  MENSUALITE: '7063',
+  FRAIS_ANNEXE: '707',
 };
 
 // Compte de charge proposé pour les catégories de dépense créées par défaut.

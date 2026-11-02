@@ -52,6 +52,8 @@ export const ACCESS_AREAS = [
   'accounting',
   'card-scan',
   'payment-validation',
+  'tuition-settings',
+  'tuition-adjustments',
 ] as const;
 
 // Tous les acteurs du circuit de dépense lisent les mêmes données ; le service
@@ -196,6 +198,26 @@ export function requiredPermissionForRequest(
       : ['edit:enrollments', 'edit:academics'];
   const sous = (prefix: string) =>
     normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
+  // Frais de scolarité : le paramétrage général, l'échéancier de chaque étudiant
+  // (caisse et dossiers le lisent) et, à part, les faveurs individuelles.
+  if (sous('/frais-scolarite')) {
+    if (
+      /^\/frais-scolarite\/inscriptions\/[^/]+$/.test(normalizedPath) &&
+      isRead
+    )
+      return [
+        'view:payments',
+        'view:enrollments',
+        'view:certificates',
+        'view:tuition-adjustments',
+        'view:tuition-settings',
+      ];
+    if (/\/inscriptions\/[^/]+\/annexes$/.test(normalizedPath))
+      return ['edit:payments', 'edit:tuition-adjustments'];
+    if (sous('/frais-scolarite/inscriptions'))
+      return ['edit:tuition-adjustments'];
+    return [isRead ? 'view:tuition-settings' : 'edit:tuition-settings'];
+  }
   // Académique : la structure se règle par la scolarité, les séances et les
   // notes par les enseignants, la validation et les délibérations par le jury.
   // Filières et niveaux servent aussi aux formulaires d'inscription et de bourse.
@@ -205,6 +227,7 @@ export function requiredPermissionForRequest(
   )
     return [
       'view:academics',
+      'view:tuition-settings',
       'view:teaching',
       'view:grades',
       'view:deliberations',

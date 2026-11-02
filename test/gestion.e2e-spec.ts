@@ -2478,6 +2478,322 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .expect(409);
   });
 
+  it('gère la scolarité : tarifs, bourses, faveurs, frais annexes et perte de bourse', async () => {
+    const anneeScolarite = '2031-2032';
+    const inscrire = async (nom: string, extra: Body = {}) =>
+      (
+        await api('admin')
+          .post('/inscriptions', {
+            nouvellePersonne: { nom, prenom: 'Sco' },
+            anneeScolaire: anneeScolarite,
+            niveau: 'L1',
+            filiere: 'Informatique',
+            ...extra,
+          })
+          .expect(201)
+      ).body.id as string;
+    const plan = async (id: string) =>
+      (
+        await api('admin')
+          .get(`/frais-scolarite/inscriptions/${id}`)
+          .expect(200)
+      ).body;
+
+    await api('admin')
+      .post('/academique/annees', {
+        libelle: anneeScolarite,
+        dateDebut: '2031-09-01',
+        dateFin: '2032-07-31',
+      })
+      .expect(201);
+    // Deux mois déjà passés, deux à venir : le retard se voit tout de suite.
+    const passe = (mois: number) => {
+      const date = new Date();
+      date.setUTCMonth(date.getUTCMonth() + mois);
+      return date.toISOString().slice(0, 10);
+    };
+    await api('admin')
+      .put('/frais-scolarite/calendrier', {
+        anneeScolaire: anneeScolarite,
+        mois: [
+          { libelle: 'Octobre', dateLimite: passe(-2) },
+          { libelle: 'Novembre', dateLimite: passe(-1) },
+          { libelle: 'Décembre', dateLimite: passe(1) },
+          { libelle: 'Janvier', dateLimite: passe(2) },
+        ],
+      })
+      .expect(200);
+    await api('admin')
+      .put('/frais-scolarite/tarifs', {
+        tarifs: [
+          { niveau: 'L1', filiereId: null, montantMensuel: 30000 },
+          { niveau: 'L1', filiereId: ids.filiere, montantMensuel: 35000 },
+        ],
+      })
+      .expect(200);
+
+    // Inscrit direct : tous les mois au prix de sa filière.
+    const direct = await inscrire('Direct');
+    let situation = await plan(direct);
+    expect(situation.regime).toBe('Inscription directe · tarif normal');
+    expect(situation.mensualites.map((ligne: Body) => ligne.montant)).toEqual([
+      35000, 35000, 35000, 35000,
+    ]);
+
+    // Le versement solde les mois dans l'ordre, sans dépasser le reste.
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: direct,
+        montant: 40000,
+        typePaiement: 'MENSUALITE',
+      })
+      .expect(201);
+    situation = await plan(direct);
+    expect(situation.mensualites.map((ligne: Body) => ligne.reste)).toEqual([
+      0, 30000, 35000, 35000,
+    ]);
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: direct,
+        montant: 200000,
+        typePaiement: 'MENSUALITE',
+      })
+      .expect(400);
+    const nonAffectes = await api('admin').get('/paiements/non-affectes');
+    expect(
+      nonAffectes.body.some((item: Body) => item.dossierId === direct),
+    ).toBe(false);
+
+    // Une faveur individuelle : payer deux mois, sous le déjà versé c'est refusé.
+    await api('admin')
+      .post(`/frais-scolarite/inscriptions/${direct}/nombre-mois`, {
+        nombre: 2,
+      })
+      .expect(201);
+    situation = await plan(direct);
+    expect(situation.mensualites).toHaveLength(2);
+    expect(situation.personnalise).toBe(true);
+    await api('admin')
+      .post(`/frais-scolarite/inscriptions/${direct}/reinitialiser`)
+      .expect(201);
+    expect((await plan(direct)).mensualites).toHaveLength(4);
+
+    const autre = await inscrire('Reduit');
+    await api('admin')
+      .post(`/frais-scolarite/inscriptions/${autre}/reduction`, { taux: 20 })
+      .expect(201);
+    expect((await plan(autre)).mensualites[0].montant).toBe(28000);
+    // Une annulation remet le mois à payer.
+    const verse = await api('admin')
+      .post('/paiements', {
+        inscriptionId: autre,
+        montant: 28000,
+        typePaiement: 'MENSUALITE',
+      })
+      .expect(201);
+    expect((await plan(autre)).mensualites[0].reste).toBe(0);
+    await api('admin')
+      .post(`/paiements/${verse.body.id}/annulation`, {
+        motif: 'Saisie de test',
+      })
+      .expect(201);
+    expect((await plan(autre)).mensualites[0].reste).toBe(28000);
+
+    // Frais annexe : dû par le groupe, ou ajouté à une seule personne.
+    const polo = await api('admin')
+      .post('/frais-scolarite/annexes', {
+        nom: 'Polo',
+        montant: 5000,
+        anneeScolaire: anneeScolarite,
+        cible: 'GROUPE',
+        niveau: 'L1',
+      })
+      .expect(201);
+    expect(polo.body.etudiants).toBe(2);
+    situation = await plan(direct);
+    expect(situation.annexes[0].libelle).toBe('Polo');
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: direct,
+        ligneScolariteId: situation.annexes[0].id,
+        montant: 6000,
+        typePaiement: 'FRAIS_ANNEXE',
+      })
+      .expect(400);
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: direct,
+        ligneScolariteId: situation.annexes[0].id,
+        montant: 5000,
+        typePaiement: 'FRAIS_ANNEXE',
+      })
+      .expect(201);
+    expect((await plan(direct)).annexes[0].reste).toBe(0);
+    const badge = await api('admin')
+      .post('/frais-scolarite/annexes', {
+        nom: 'Badge',
+        montant: 2000,
+        anneeScolaire: anneeScolarite,
+        cible: 'A_LA_DEMANDE',
+      })
+      .expect(201);
+    expect(badge.body.etudiants).toBe(0);
+    await api('admin')
+      .post(`/frais-scolarite/inscriptions/${autre}/annexes`, {
+        fraisAnnexeId: badge.body.id,
+      })
+      .expect(201);
+    expect((await plan(autre)).annexes).toHaveLength(2);
+
+    // Bourse : quatre mois à dates fixes, ou une réduction, à conserver avec 12.
+    const fixe = await api('admin')
+      .post('/frais-scolarite/bourses', {
+        nom: 'Excellence fixe',
+        modeScolarite: 'MOIS_FIXES',
+        moyenneMinimale: 12,
+        echeances: [
+          {
+            libelle: 'Tranche 1',
+            dateEcheance: passe(1),
+            montantAttendu: 50000,
+          },
+          { libelle: 'Tranche 2', dateEcheance: passe(3), montantAttendu: '' },
+        ],
+      })
+      .expect(201);
+    const reduite = await api('admin')
+      .post('/frais-scolarite/bourses', {
+        nom: 'Excellence reduite',
+        modeScolarite: 'REDUCTION',
+        tauxReduction: 50,
+        reductionSurInscription: true,
+        moyenneMinimale: 12,
+      })
+      .expect(201);
+    const boursier = async (nom: string, typeBourseId: string) => {
+      const demande = await api('admin')
+        .post('/demandes-bourse', {
+          nouvellePersonne: { nom, prenom: 'Bou' },
+          niveauDemande: 'PREMIERE_ANNEE',
+          filiereSouhaitee: 'Informatique',
+        })
+        .expect(201);
+      await api('admin')
+        .patch(`/demandes-bourse/${demande.body.id}/decision`, {
+          statut: 'ACCEPTEE',
+          typeBourseId,
+        })
+        .expect(200);
+      return inscrireViaBourse(demande.body.id);
+    };
+    const inscrireViaBourse = async (demandeBourseId: string) =>
+      (
+        await api('admin')
+          .post('/inscriptions', {
+            viaBourse: true,
+            demandeBourseId,
+            anneeScolaire: anneeScolarite,
+            niveau: 'L1',
+            filiere: 'Informatique',
+          })
+          .expect(201)
+      ).body.id as string;
+    const boursierFixe = await boursier('Fixe', fixe.body.id);
+    situation = await plan(boursierFixe);
+    expect(situation.regime).toBe('Bourse Excellence fixe');
+    expect(
+      situation.mensualites.map((ligne: Body) => [
+        ligne.libelle,
+        ligne.montant,
+      ]),
+    ).toEqual([
+      ['Tranche 1', 50000],
+      ['Tranche 2', 35000],
+    ]);
+    const boursierReduit = await boursier('Reduit', reduite.body.id);
+    situation = await plan(boursierReduit);
+    expect(situation.mensualites[0].montant).toBe(17500);
+    // La réduction s'applique ici aussi aux frais d'inscription.
+    const finance = await api('admin').get(
+      `/inscriptions/${boursierReduit}/finance`,
+    );
+    expect(Number(finance.body.obligations[0].montantAttendu)).toBe(25000);
+
+    // Moyenne insuffisante : l'étudiant apparaît, une personne décide.
+    const classe = await api('admin')
+      .post('/academique/classes', {
+        anneeAcademiqueId: (
+          await api('admin').get('/academique/annees')
+        ).body.find((item: Body) => item.libelle === anneeScolarite).id,
+        filiereId: ids.filiere,
+        niveau: 'L1',
+      })
+      .expect(201);
+    const prisma = app.get(
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('../src/prisma/prisma.service').PrismaService,
+    );
+    const deliberation = await prisma.deliberation.create({
+      data: {
+        classeId: classe.body.id,
+        semestre: 1,
+        statut: 'CLOTUREE',
+        ouverteParNom: 'Test',
+        dateCloture: new Date(),
+      },
+    });
+    await prisma.resultatDeliberation.create({
+      data: {
+        deliberationId: deliberation.id,
+        inscriptionId: boursierReduit,
+        moyenne: 11,
+        creditsAcquis: 0,
+        creditsTotal: 30,
+        decision: 'AJOURNE',
+        detail: {},
+      },
+    });
+    const aConfirmer = await api('admin')
+      .get('/frais-scolarite/bourses/a-confirmer')
+      .expect(200);
+    expect(aConfirmer.body).toHaveLength(1);
+    expect(aConfirmer.body[0]).toMatchObject({
+      inscriptionId: boursierReduit,
+      moyenne: 11,
+      moyenneMinimale: 12,
+    });
+    await api('admin')
+      .post('/frais-scolarite/bourses/decision', {
+        inscriptionId: boursierReduit,
+        deliberationId: deliberation.id,
+        decision: 'RETIREE',
+      })
+      .expect(201);
+    situation = await plan(boursierReduit);
+    expect(situation.regime).toBe('Tarif normal (bourse retirée)');
+    // Les mois déjà échus gardent leur prix ; ceux à venir passent au tarif normal.
+    expect(situation.mensualites.map((ligne: Body) => ligne.montant)).toEqual([
+      17500, 17500, 35000, 35000,
+    ]);
+    expect(
+      (await api('admin').get('/frais-scolarite/bourses/a-confirmer')).body,
+    ).toHaveLength(0);
+
+    // Les mois échus remontent dans les retards, et le paramétrage a son droit.
+    const retards = await api('admin')
+      .get('/rapports/paiements-en-retard')
+      .expect(200);
+    expect(
+      retards.body.echeances.some(
+        (item: Body) => item.echeance.libelle === 'Octobre',
+      ),
+    ).toBe(true);
+    await api('comptable').get('/frais-scolarite/parametres').expect(403);
+    await api('finances')
+      .post(`/frais-scolarite/inscriptions/${direct}/reduction`, { taux: 90 })
+      .expect(403);
+  });
+
   it('ne donne à chacun que les cartes de la Vue d’ensemble attribuées à son poste', async () => {
     const compte = await api('admin')
       .post('/utilisateurs', {

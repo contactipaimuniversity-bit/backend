@@ -71,6 +71,10 @@ enum TypePaiement {
   REPORT
   // Encaissement saisi par erreur : ligne négative qui neutralise le paiement d'origine.
   ANNULATION
+  // Scolarité mensuelle : le versement solde les mois du plus ancien au plus récent.
+  MENSUALITE
+  // Frais annexe d'un étudiant (polo, badge...) : rattaché à sa ligne d'échéancier.
+  FRAIS_ANNEXE
 }
 
 enum StatutCandidaturePersonnel {
@@ -299,6 +303,14 @@ model TypeBourse {
   fraisInscription Decimal  @db.Decimal(10, 2)
   tauxReduction    Decimal? @db.Decimal(5, 2)
 
+  // Ce que paie le boursier : REDUCTION (les mois de l'année, réduits) ou
+  // MOIS_FIXES (seulement les échéances de cette bourse, avec leurs dates).
+  modeScolarite           String   @default("REDUCTION")
+  reductionSurInscription Boolean  @default(false)
+  // Moyenne à conserver (vide : aucune condition), vérifiée à SEMESTRE ou ANNEE.
+  moyenneMinimale         Decimal? @default(12) @db.Decimal(4, 2)
+  verificationMoyenne     String   @default("SEMESTRE")
+
   echeances      EcheanceBourse[]
   demandesBourse DemandeBourse[]
 
@@ -377,6 +389,15 @@ model Inscription {
   filiereId  String?
   filiereRef Filiere? @relation(fields: [filiereId], references: [id], onDelete: SetNull)
 
+  // Échéancier de scolarité de l'étudiant, figé à sa création.
+  lignesScolarite        LigneScolarite[]
+  decisionsBourse        DecisionBourse[]
+  // Réduction accordée à cet étudiant : remplace celle de sa bourse.
+  reductionIndividuelle  Decimal?         @db.Decimal(5, 2)
+  // Échéancier retouché à la main : un recalcul général ne l'écrase pas.
+  echeancierPersonnalise Boolean          @default(false)
+  bourseRetireeLe        DateTime?
+
   // Dernière modification : sert à refuser une modification faite hors ligne sur
   // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
   modifieLe DateTime @default(now()) @updatedAt
@@ -438,6 +459,9 @@ model Paiement {
   echeance         EcheanceBourse? @relation(fields: [echeanceId], references: [id])
   elementDossierId String?
   elementDossier   ElementDossier? @relation(fields: [elementDossierId], references: [id])
+  // Frais annexe réglé. Une mensualité n'a pas de ligne : elle solde les mois dans l'ordre.
+  ligneScolariteId String?
+  ligneScolarite   LigneScolarite? @relation(fields: [ligneScolariteId], references: [id], onDelete: SetNull)
   montant          Decimal         @db.Decimal(10, 2)
   datePaiement     DateTime        @default(now())
   typePaiement     TypePaiement
@@ -471,6 +495,87 @@ model Paiement {
   @@index([enregistreLe])
   @@index([statutRemise, datePaiement])
   @@map("paiements")
+}
+
+// ---------- FRAIS DE SCOLARITÉ ----------
+
+// Les mois à payer d'une année scolaire, avec leur date limite.
+model MoisScolarite {
+  id            String   @id @default(uuid())
+  anneeScolaire String
+  ordre         Int
+  libelle       String
+  dateLimite    DateTime
+
+  @@unique([anneeScolaire, ordre])
+  @@map("mois_scolarite")
+}
+
+// Prix d'un mois : par niveau, et par filière quand elle diffère (filiereId renseigné).
+model TarifScolarite {
+  id             String   @id @default(uuid())
+  niveau         String
+  filiereId      String?
+  filiere        Filiere? @relation(fields: [filiereId], references: [id], onDelete: Cascade)
+  montantMensuel Decimal  @db.Decimal(10, 2)
+
+  @@unique([niveau, filiereId])
+  @@map("tarifs_scolarite")
+}
+
+// Polo, badge, sortie... : dû par tout un groupe (GROUPE) ou ajouté à un étudiant (A_LA_DEMANDE).
+model FraisAnnexe {
+  id            String    @id @default(uuid())
+  nom           String
+  montant       Decimal   @db.Decimal(10, 2)
+  anneeScolaire String
+  cible         String    @default("GROUPE")
+  // Vides : tous les niveaux, toutes les filières.
+  niveau        String?
+  filiereId     String?
+  filiere       Filiere?  @relation(fields: [filiereId], references: [id], onDelete: SetNull)
+  dateLimite    DateTime?
+  actif         Boolean   @default(true)
+
+  lignes LigneScolarite[]
+
+  @@map("frais_annexes")
+}
+
+// Ce que doit un étudiant : ses mois (MENSUALITE) et ses frais annexes (ANNEXE).
+model LigneScolarite {
+  id            String       @id @default(uuid())
+  inscriptionId String
+  inscription   Inscription  @relation(fields: [inscriptionId], references: [id], onDelete: Cascade)
+  type          String       @default("MENSUALITE")
+  ordre         Int
+  libelle       String
+  dateLimite    DateTime?
+  montant       Decimal      @db.Decimal(10, 2)
+  fraisAnnexeId String?
+  fraisAnnexe   FraisAnnexe? @relation(fields: [fraisAnnexeId], references: [id], onDelete: SetNull)
+
+  paiements Paiement[]
+
+  @@unique([inscriptionId, fraisAnnexeId])
+  @@index([inscriptionId, type])
+  @@map("lignes_scolarite")
+}
+
+// Décision prise après une moyenne insuffisante : bourse RETIREE ou MAINTENUE.
+model DecisionBourse {
+  id             String       @id @default(uuid())
+  inscriptionId  String
+  inscription    Inscription  @relation(fields: [inscriptionId], references: [id], onDelete: Cascade)
+  deliberationId String
+  deliberation   Deliberation @relation(fields: [deliberationId], references: [id], onDelete: Cascade)
+  decision       String
+  motif          String?
+  parNom         String
+  le             DateTime     @default(now())
+
+  @@unique([inscriptionId, deliberationId])
+  @@map("decisions_bourse")
 }
 
 model CandidaturePersonnel {
@@ -840,6 +945,8 @@ model Filiere {
   classes      Classe[]
   unites       UniteEnseignement[]
   inscriptions Inscription[]
+  tarifs       TarifScolarite[]
+  fraisAnnexes FraisAnnexe[]
 
   @@map("filieres")
 }
@@ -1076,8 +1183,9 @@ model Deliberation {
   clotureParNom String?
   dateCloture   DateTime?
 
-  resultats ResultatDeliberation[]
-  credits   CreditUE[]
+  resultats       ResultatDeliberation[]
+  credits         CreditUE[]
+  decisionsBourse DecisionBourse[]
 
   @@unique([classeId, semestre])
   @@map("deliberations")

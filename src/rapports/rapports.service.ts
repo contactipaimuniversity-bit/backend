@@ -2,6 +2,11 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client';
 import { resolveEntityLabels } from '../audit/entity-labels';
 import { Acteur, peut } from '../common/acteur';
+import {
+  assurerTousLesEcheanciers,
+  retardsScolarite,
+  resteTotalScolarite,
+} from '../frais-scolarite/frais-scolarite.situation';
 import { PrismaService } from '../prisma/prisma.service';
 import { PeriodeRapportDto } from './dto/periode-rapport.dto';
 
@@ -17,6 +22,7 @@ export class RapportsService {
     page?: string;
     limit?: string;
   }) {
+    await assurerTousLesEcheanciers(this.prisma);
     const [demandes, inscriptions, annees] = await Promise.all([
       this.prisma.demandeBourse.findMany({
         select: {
@@ -68,6 +74,7 @@ export class RapportsService {
           anneeScolaire: true,
           niveau: true,
           filiere: true,
+          lignesScolarite: { select: { montant: true } },
           personne: {
             select: {
               nom: true,
@@ -201,6 +208,10 @@ export class RapportsService {
           anneeScolaire: inscription.anneeScolaire,
           niveau: inscription.niveau,
           filiere: inscription.filiere,
+          // Les mois et frais annexes dus ; leurs versements sont dans « paiements ».
+          montantsAttendusSupplementaires: inscription.lignesScolarite.map(
+            (ligne) => ligne.montant,
+          ),
           personne: inscription.personne,
           elementsDossier: inscription.elementsDossier,
           paiements: inscription.paiements,
@@ -333,93 +344,76 @@ export class RapportsService {
     };
   }
 
+  // Échéances dépassées et non soldées, d'après l'échéancier de chaque étudiant.
   async paiementsEnRetard() {
-    const now = new Date();
-    const echeances = await this.prisma.echeanceBourse.findMany({
-      where: {
-        dateEcheance: { lt: now },
-        montantAttendu: { not: null },
-      },
-      include: {
-        typeBourse: true,
-        paiements: {
-          select: {
-            montant: true,
-            demandeBourseId: true,
-            inscription: { select: { demandeBourseId: true } },
-          },
-        },
-      },
-      orderBy: { dateEcheance: 'asc' },
+    const retards = await retardsScolarite(this.prisma);
+    const personnes = await this.prisma.inscription.findMany({
+      where: { id: { in: retards.map((retard) => retard.inscriptionId) } },
+      select: { id: true, personne: true },
     });
-    // Chaque boursier accepté doit l'échéance : le retard se calcule par dossier.
-    const boursiers = await this.prisma.demandeBourse.findMany({
-      where: {
-        statut: 'ACCEPTEE',
-        typeBourseId: {
-          in: [...new Set(echeances.map((echeance) => echeance.typeBourseId))],
-        },
-      },
-      select: { id: true, typeBourseId: true, personne: true },
-    });
-
-    const retards = echeances
-      .map((echeance) => {
-        const { paiements, ...echeanceSansPaiements } = echeance;
-        const montantAttendu = Number(echeance.montantAttendu ?? 0);
-        const payeParDemande = new Map<string, number>();
-        for (const paiement of paiements) {
-          const demandeId =
-            paiement.demandeBourseId ?? paiement.inscription?.demandeBourseId;
-          if (!demandeId) continue;
-          payeParDemande.set(
-            demandeId,
-            (payeParDemande.get(demandeId) ?? 0) + Number(paiement.montant),
-          );
-        }
-        const concernes = boursiers.filter(
-          (demande) => demande.typeBourseId === echeance.typeBourseId,
-        );
-        const dossiers = concernes.flatMap((demande) => {
-          const paye = payeParDemande.get(demande.id) ?? 0;
-          const reste = this.roundMoney(montantAttendu - paye);
-          return reste > 0
-            ? [
-                {
-                  demandeBourseId: demande.id,
-                  personne: demande.personne,
-                  montantPaye: this.money(paye),
-                  resteAPayer: this.money(reste),
-                },
-              ]
-            : [];
-        });
-        const montantPaye = concernes.reduce(
-          (total, demande) =>
-            total +
-            Math.min(montantAttendu, payeParDemande.get(demande.id) ?? 0),
-          0,
-        );
-
-        return {
-          echeance: echeanceSansPaiements,
-          montantAttendu: this.money(montantAttendu * concernes.length),
-          montantPaye: this.money(montantPaye),
-          resteAPayer: this.money(
-            dossiers.reduce(
-              (total, dossier) => total + Number(dossier.resteAPayer),
-              0,
-            ),
-          ),
-          dossiers,
+    const personneDe = new Map(
+      personnes.map((item) => [item.id, item.personne]),
+    );
+    const groupes = new Map<
+      string,
+      {
+        libelle: string;
+        dateEcheance: Date | null;
+        regime: string;
+        attendu: number;
+        paye: number;
+        dossiers: Array<{
+          inscriptionId: string;
+          personne: unknown;
+          montantPaye: string;
+          resteAPayer: string;
+        }>;
+      }
+    >();
+    for (const retard of retards)
+      for (const ligne of retard.echues) {
+        const regime = retard.regime.split(' · ')[0];
+        const cle = `${ligne.libelle}|${ligne.dateLimite?.getTime()}|${regime}`;
+        const groupe = groupes.get(cle) ?? {
+          libelle: ligne.libelle,
+          dateEcheance: ligne.dateLimite,
+          regime,
+          attendu: 0,
+          paye: 0,
+          dossiers: [],
         };
-      })
-      .filter((retard) => Number(retard.resteAPayer) > 0);
-
-    return { total: retards.length, echeances: retards };
+        groupe.attendu += ligne.montant;
+        groupe.paye += ligne.paye;
+        groupe.dossiers.push({
+          inscriptionId: retard.inscriptionId,
+          personne: personneDe.get(retard.inscriptionId),
+          montantPaye: this.money(ligne.paye),
+          resteAPayer: this.money(ligne.reste),
+        });
+        groupes.set(cle, groupe);
+      }
+    const echeances = [...groupes.values()]
+      .sort(
+        (first, second) =>
+          (first.dateEcheance?.getTime() ?? 0) -
+          (second.dateEcheance?.getTime() ?? 0),
+      )
+      .map((groupe) => ({
+        echeance: {
+          libelle: groupe.libelle,
+          dateEcheance: groupe.dateEcheance,
+          typeBourse: { nom: groupe.regime },
+        },
+        montantAttendu: this.money(groupe.attendu),
+        montantPaye: this.money(groupe.paye),
+        resteAPayer: this.money(groupe.attendu - groupe.paye),
+        dossiers: groupe.dossiers,
+      }));
+    return { total: echeances.length, echeances };
   }
 
   async synthese() {
+    const resteScolarite = await resteTotalScolarite(this.prisma);
     const [
       prospectsActifs,
       demandesEnCours,
@@ -592,7 +586,10 @@ export class RapportsService {
       totalEncaisse: this.money(Number(paiements._sum.montant ?? 0)),
       resteBourses: this.money(resteBourses),
       resteInscriptions: this.money(resteInscriptions),
-      totalResteARecouvrer: this.money(resteBourses + resteInscriptions),
+      resteScolarite: this.money(resteScolarite),
+      totalResteARecouvrer: this.money(
+        resteBourses + resteInscriptions + resteScolarite,
+      ),
       tendance,
     };
   }
@@ -651,6 +648,7 @@ export class RapportsService {
         ? {
             resteBourses: synthese.resteBourses,
             resteInscriptions: synthese.resteInscriptions,
+            resteScolarite: synthese.resteScolarite,
             totalResteARecouvrer: synthese.totalResteARecouvrer,
           }
         : {}),
@@ -815,6 +813,28 @@ export class RapportsService {
           personne: dossier.personne,
           reste,
         });
+    }
+    const retardsMois = await retardsScolarite(this.prisma);
+    if (retardsMois.length) {
+      const personnes = await this.prisma.inscription.findMany({
+        where: { id: { in: retardsMois.map((item) => item.inscriptionId) } },
+        select: { id: true, personne: true },
+      });
+      for (const retard of retardsMois) {
+        const personne = personnes.find(
+          (item) => item.id === retard.inscriptionId,
+        )?.personne;
+        if (!personne) continue;
+        const existing = restes.get(retard.inscriptionId);
+        if (existing) existing.reste += retard.resteEchu;
+        else
+          restes.set(retard.inscriptionId, {
+            dossierType: 'inscription',
+            dossierId: retard.inscriptionId,
+            personne,
+            reste: retard.resteEchu,
+          });
+      }
     }
     const impayes = [...restes.values()].sort(
       (first, second) => second.reste - first.reste,

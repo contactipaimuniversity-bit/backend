@@ -11,6 +11,11 @@ import type { SaisieLocale } from '../common/saisie-locale';
 import { AnnulerPaiementDto } from './dto/annuler-paiement.dto';
 import { CreatePaiementDto } from './dto/create-paiement.dto';
 import {
+  assurerEcheancier,
+  verseMensualites,
+} from '../frais-scolarite/frais-scolarite.situation';
+import {
+  HORS_SCOLARITE,
   numeroRecu,
   parseModePaiement,
   verrouillerDossier,
@@ -20,10 +25,15 @@ import {
   ReporterTropPercuDto,
 } from './dto/trop-percu.dto';
 
-const TYPES_PAIEMENT = [
+const TYPES_A_AFFECTER = [
   'FRAIS_DEPOT',
   'FRAIS_INSCRIPTION',
   'ECHEANCE_BOURSE',
+] as const;
+const TYPES_PAIEMENT = [
+  ...TYPES_A_AFFECTER,
+  'MENSUALITE',
+  'FRAIS_ANNEXE',
 ] as const;
 
 type TypePaiementValue = (typeof TYPES_PAIEMENT)[number];
@@ -52,6 +62,7 @@ export class PaiementsService {
     const inscriptionId = this.optionalString(createDto.inscriptionId);
     const echeanceId = this.optionalString(createDto.echeanceId);
     const elementDossierId = this.optionalString(createDto.elementDossierId);
+    const ligneScolariteId = this.optionalString(createDto.ligneScolariteId);
     const typePaiement = this.parseTypePaiement(createDto.typePaiement);
     const montant = this.montant(createDto.montant);
     const modePaiement = parseModePaiement(createDto.modePaiement);
@@ -70,10 +81,37 @@ export class PaiementsService {
     if (elementDossierId && !elementDossier) {
       throw new NotFoundException('Obligation de dossier introuvable');
     }
+    if (typePaiement === 'FRAIS_ANNEXE' && !ligneScolariteId)
+      throw new BadRequestException('Indiquez le frais annexe réglé');
+    const ligneAnnexe =
+      typePaiement === 'FRAIS_ANNEXE'
+        ? await this.prisma.ligneScolarite.findFirst({
+            where: { id: ligneScolariteId as string, type: 'ANNEXE' },
+          })
+        : null;
+    if (typePaiement === 'FRAIS_ANNEXE' && !ligneAnnexe)
+      throw new NotFoundException('Frais annexe introuvable');
+    if (
+      ligneAnnexe &&
+      inscriptionId &&
+      ligneAnnexe.inscriptionId !== inscriptionId
+    )
+      throw new BadRequestException('Ce frais ne correspond pas au dossier');
     const resolvedDemandeBourseId =
       demandeBourseId ?? elementDossier?.demandeBourseId;
     const resolvedInscriptionId =
-      inscriptionId ?? elementDossier?.inscriptionId;
+      inscriptionId ??
+      elementDossier?.inscriptionId ??
+      ligneAnnexe?.inscriptionId;
+    if (
+      (typePaiement === 'MENSUALITE' || typePaiement === 'FRAIS_ANNEXE') &&
+      (!resolvedInscriptionId || elementDossierId || echeanceId)
+    )
+      throw new BadRequestException(
+        'La scolarité et les frais annexes se règlent sur une inscription',
+      );
+    if (typePaiement === 'MENSUALITE')
+      await assurerEcheancier(this.prisma, resolvedInscriptionId as string);
 
     if (
       (resolvedDemandeBourseId && resolvedInscriptionId) ||
@@ -168,12 +206,25 @@ export class PaiementsService {
           dossier,
           Number(montant),
         );
+      if (typePaiement === 'MENSUALITE')
+        await this.ensureMoisWithinRemaining(
+          transaction,
+          resolvedInscriptionId as string,
+          Number(montant),
+        );
+      if (ligneAnnexe)
+        await this.ensureAnnexeWithinRemaining(
+          transaction,
+          ligneAnnexe,
+          Number(montant),
+        );
       return transaction.paiement.create({
         data: {
           demandeBourseId: resolvedDemandeBourseId,
           inscriptionId: resolvedInscriptionId,
           echeanceId,
           elementDossierId,
+          ligneScolariteId: ligneAnnexe?.id,
           montant,
           typePaiement,
           modePaiement,
@@ -186,6 +237,47 @@ export class PaiementsService {
         include: { echeance: true, elementDossier: true },
       });
     });
+  }
+
+  private async ensureMoisWithinRemaining(
+    transaction: Transaction,
+    inscriptionId: string,
+    montant: number,
+  ) {
+    const lignes = await transaction.ligneScolarite.aggregate({
+      where: { inscriptionId, type: 'MENSUALITE' },
+      _sum: { montant: true },
+    });
+    const du = Number(lignes._sum.montant ?? 0);
+    if (!du)
+      throw new BadRequestException(
+        "Cet étudiant n'a pas d'échéancier : réglez le calendrier et les tarifs dans Frais de scolarité",
+      );
+    const reste = this.roundMoney(
+      du - (await verseMensualites(transaction, inscriptionId)),
+    );
+    if (montant > reste)
+      throw new BadRequestException(
+        `Le montant dépasse le reste à payer sur les mois (${reste} F)`,
+      );
+  }
+
+  private async ensureAnnexeWithinRemaining(
+    transaction: Transaction,
+    ligne: { id: string; libelle: string; montant: unknown },
+    montant: number,
+  ) {
+    const verse = await transaction.paiement.aggregate({
+      where: { ligneScolariteId: ligne.id },
+      _sum: { montant: true },
+    });
+    const reste = this.roundMoney(
+      Number(ligne.montant) - Number(verse._sum.montant ?? 0),
+    );
+    if (montant > reste)
+      throw new BadRequestException(
+        `Le montant dépasse le reste à payer sur « ${ligne.libelle} » (${reste} F)`,
+      );
   }
 
   async findByDemandeBourse(id: string) {
@@ -237,6 +329,7 @@ export class PaiementsService {
         inscription: { include: { personne: true } },
         elementDossier: { include: { elementRequis: true } },
         echeance: true,
+        ligneScolarite: { select: { libelle: true } },
         annulation: { select: { id: true } },
       },
       orderBy: [{ datePaiement: ordreDate }, { id: ordreDate }],
@@ -264,7 +357,9 @@ export class PaiementsService {
     inscription: { filiere: string; personne: unknown } | null;
     elementDossier: { elementRequis: { nom: string } } | null;
     echeance: { libelle: string } | null;
+    ligneScolarite?: { libelle: string } | null;
   }) {
+    const mensualite = payment.typePaiement === 'MENSUALITE';
     return {
       id: payment.id,
       montant: payment.montant,
@@ -284,9 +379,16 @@ export class PaiementsService {
         : `Inscription · ${payment.inscription?.filiere ?? '-'}`,
       personne:
         payment.demandeBourse?.personne ?? payment.inscription?.personne,
-      obligation: payment.elementDossier?.elementRequis.nom ?? null,
+      obligation:
+        payment.elementDossier?.elementRequis.nom ??
+        payment.ligneScolarite?.libelle ??
+        (mensualite ? 'Scolarité mensuelle' : null),
       echeance: payment.echeance?.libelle ?? null,
-      affecte: payment.elementDossier !== null || payment.echeanceId !== null,
+      affecte:
+        payment.elementDossier !== null ||
+        payment.echeanceId !== null ||
+        mensualite ||
+        Boolean(payment.ligneScolarite),
       annule: Boolean(payment.annulation),
       annulePaiementId: payment.annulePaiementId,
     };
@@ -338,6 +440,7 @@ export class PaiementsService {
             inscriptionId: paiement.inscriptionId,
             echeanceId: paiement.echeanceId,
             elementDossierId: paiement.elementDossierId,
+            ligneScolariteId: paiement.ligneScolariteId,
             montant: (-montant).toFixed(2),
             typePaiement: 'ANNULATION',
             // L'argent ressort par où il était entré.
@@ -522,7 +625,7 @@ export class PaiementsService {
         elementDossierId: null,
         echeanceId: null,
         // Les régularisations (report, remboursement) ne sont pas à affecter.
-        typePaiement: { in: [...TYPES_PAIEMENT] },
+        typePaiement: { in: [...TYPES_A_AFFECTER] },
         annulation: { is: null },
       },
       include: {
@@ -646,7 +749,7 @@ export class PaiementsService {
     const paiements = await this.prisma.paiement.findMany({
       where:
         normalizedType === 'inscription'
-          ? { inscriptionId: dossierId }
+          ? { inscriptionId: dossierId, ...HORS_SCOLARITE }
           : { demandeBourseId: dossierId },
       select: { montant: true },
     });

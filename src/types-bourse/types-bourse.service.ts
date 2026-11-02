@@ -164,18 +164,6 @@ export class TypesBourseService {
 
     const libelle = this.requiredString(createDto.libelle, 'libelle');
     const ordre = this.positiveInteger(createDto.ordre, 'ordre');
-    const expected = this.expectedScheduleCount(type.nom);
-
-    if (expected !== null && ordre > expected) {
-      throw new BadRequestException(
-        `${type.nom} accepte au maximum ${expected} echeances`,
-      );
-    }
-    if (expected !== null && type.echeances.length >= expected) {
-      throw new BadRequestException(
-        `${type.nom} est deja configure avec ${expected} echeances`,
-      );
-    }
 
     const montantAttendu = this.decimal(
       createDto.montantAttendu,
@@ -251,20 +239,8 @@ export class TypesBourseService {
   ) {
     return {
       ...type,
-      echeancesAttendues: this.expectedScheduleCount(type.nom),
       echeancesConfigurees: type.echeances.length,
     };
-  }
-
-  private expectedScheduleCount(nom: string): number | null {
-    const normalized = nom.trim().toLowerCase();
-    if (normalized === 'excellence') {
-      return 3;
-    }
-    if (normalized === 'premium') {
-      return 10;
-    }
-    return null;
   }
 
   private requiredString(value: string | undefined, field: string): string {

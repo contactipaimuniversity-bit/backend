@@ -12,6 +12,7 @@ import {
   nomUtilisateur,
   numeroRecu,
   parseModePaiement,
+  HORS_SCOLARITE,
 } from '../paiements/encaissement';
 import { CreateInscriptionDto } from './dto/create-inscription.dto';
 import { SearchInscriptionsDto } from './dto/search-inscriptions.dto';
@@ -80,14 +81,20 @@ export class InscriptionsService {
       demandeBourseId,
       createDto.confirmerDemandeEnCours === true,
     );
+    const reduction = await this.reductionDesFrais(demandeBourseId);
 
     return this.prisma.$transaction(async (transaction) => {
-      const catalogue = await transaction.elementRequis.findMany({
-        where: {
-          contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] },
-          niveauApplicable: applicables,
-        },
-      });
+      const catalogue = (
+        await transaction.elementRequis.findMany({
+          where: {
+            contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] },
+            niveauApplicable: applicables,
+          },
+        })
+      ).map((element) => ({
+        ...element,
+        montantAttendu: this.montantReduit(element, reduction),
+      }));
       const statuses = createDto.preparation?.statuses ?? {};
       const dossierElements = catalogue.map((element) => {
         const requestedStatus = statuses[element.id];
@@ -200,6 +207,33 @@ export class InscriptionsService {
       }
       return inscription;
     });
+  }
+
+  // Une bourse peut aussi réduire les frais d'inscription (réglage par bourse).
+  private async reductionDesFrais(demandeBourseId: string | null) {
+    if (!demandeBourseId) return 0;
+    const demande = await this.prisma.demandeBourse.findUnique({
+      where: { id: demandeBourseId },
+      select: {
+        statut: true,
+        typeBourse: {
+          select: { reductionSurInscription: true, tauxReduction: true },
+        },
+      },
+    });
+    return demande?.statut === 'ACCEPTEE' &&
+      demande.typeBourse?.reductionSurInscription
+      ? Number(demande.typeBourse.tauxReduction ?? 0)
+      : 0;
+  }
+
+  private montantReduit<T extends { mul(value: number): T }>(
+    element: { categorie: string; montantAttendu: T | null },
+    reduction: number,
+  ) {
+    return reduction && element.categorie === 'FRAIS' && element.montantAttendu
+      ? element.montantAttendu.mul(1 - reduction / 100)
+      : element.montantAttendu;
   }
 
   private prepareInitialPayment(
@@ -573,7 +607,11 @@ export class InscriptionsService {
           orderBy: { elementRequis: { nom: 'asc' } },
         },
         paiements: {
-          where: { elementDossierId: null, echeanceId: null },
+          where: {
+            elementDossierId: null,
+            echeanceId: null,
+            ...HORS_SCOLARITE,
+          },
           select: { montant: true },
         },
       },
@@ -621,7 +659,7 @@ export class InscriptionsService {
   private async ensureElementsForDossier(id: string) {
     const inscription = await this.prisma.inscription.findUnique({
       where: { id },
-      select: { niveau: true },
+      select: { niveau: true, demandeBourseId: true },
     });
     if (!inscription) return;
     const catalogue = await this.prisma.elementRequis.findMany({
@@ -629,14 +667,15 @@ export class InscriptionsService {
         contexte: { in: ['INSCRIPTION_DIRECTE', 'TOUS'] },
         niveauApplicable: await this.niveauApplicable(inscription.niveau),
       },
-      select: { id: true, montantAttendu: true },
+      select: { id: true, montantAttendu: true, categorie: true },
     });
     if (!catalogue.length) return;
+    const reduction = await this.reductionDesFrais(inscription.demandeBourseId);
     await this.prisma.elementDossier.createMany({
       data: catalogue.map((element) => ({
         inscriptionId: id,
         elementRequisId: element.id,
-        montantAttendu: element.montantAttendu,
+        montantAttendu: this.montantReduit(element, reduction),
       })),
       skipDuplicates: true,
     });

@@ -1,3 +1,4 @@
+import { situationScolarite } from '../frais-scolarite/frais-scolarite.situation';
 import {
   BadRequestException,
   ConflictException,
@@ -612,10 +613,19 @@ export class DeliberationsService {
     const regles = await this.structure.regles();
     if (!regles.blocageImpayes) return null;
     const finance = await this.inscriptions.findFinance(inscriptionId);
-    const reste = finance.obligations.reduce(
-      (total, obligation) => total + Number(obligation.resteAPayer),
-      0,
-    );
+    const scolarite = await situationScolarite(this.prisma, inscriptionId);
+    const maintenant = new Date();
+    const moisEchus = [
+      ...(scolarite?.mensualites ?? []),
+      ...(scolarite?.annexes ?? []),
+    ]
+      .filter((ligne) => ligne.dateLimite && ligne.dateLimite < maintenant)
+      .reduce((total, ligne) => total + ligne.reste, 0);
+    const reste =
+      finance.obligations.reduce(
+        (total, obligation) => total + Number(obligation.resteAPayer),
+        0,
+      ) + moisEchus;
     return reste > 0
       ? `Bulletin retenu : ${reste.toLocaleString('fr-FR')} F restent à payer sur la scolarité`
       : null;

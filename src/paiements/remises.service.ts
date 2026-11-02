@@ -14,6 +14,8 @@ export const TYPES_ENCAISSEMENT = [
   'FRAIS_DEPOT',
   'FRAIS_INSCRIPTION',
   'ECHEANCE_BOURSE',
+  'MENSUALITE',
+  'FRAIS_ANNEXE',
 ] as const;
 export const STATUTS_REMISE = ['EN_ATTENTE', 'VALIDE', 'NON_RECU'] as const;
 type StatutRemise = (typeof STATUTS_REMISE)[number];

@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import type { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 type Transaction = Parameters<Parameters<PrismaService['$transaction']>[0]>[0];
@@ -10,6 +11,17 @@ export const MODES_PAIEMENT = [
   'CHEQUE',
 ] as const;
 export type ModePaiement = (typeof MODES_PAIEMENT)[number];
+
+// Versements de scolarité (et leurs annulations) : ils ont leur propre suivi et
+// ne sont jamais des paiements « à affecter » à une obligation du dossier.
+export const HORS_SCOLARITE: Prisma.PaiementWhereInput = {
+  ligneScolariteId: null,
+  typePaiement: { not: 'MENSUALITE' },
+  OR: [
+    { annulePaiementId: null },
+    { annulePaiement: { typePaiement: { not: 'MENSUALITE' } } },
+  ],
+};
 
 // Sans précision, un encaissement est en espèces.
 export function parseModePaiement(value: unknown): ModePaiement {

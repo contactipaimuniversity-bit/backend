@@ -6,6 +6,7 @@ import { AuthModule } from './auth/auth.module';
 import { DemandesBourseModule } from './demandes-bourse/demandes-bourse.module';
 import { ElementsRequisModule } from './elements-requis/elements-requis.module';
 import { InscriptionsModule } from './inscriptions/inscriptions.module';
+import { FraisScolariteModule } from './frais-scolarite/frais-scolarite.module';
 import { PaiementsModule } from './paiements/paiements.module';
 import { PersonnesModule } from './personnes/personnes.module';
 import { ProspectsModule } from './prospects/prospects.module';
@@ -39,6 +40,7 @@ import { CartesModule } from './cartes/cartes.module';
     ElementsRequisModule,
     InscriptionsModule,
     PaiementsModule,
+    FraisScolariteModule,
     UtilisateursModule,
     PersonnesModule,
     ProspectsModule,

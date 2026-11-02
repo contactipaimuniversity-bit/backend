@@ -5,5 +5,6 @@ export class CreatePaiementDto {
   typePaiement!: string;
   echeanceId?: string | null;
   elementDossierId?: string | null;
+  ligneScolariteId?: string | null;
   modePaiement?: string;
 }
