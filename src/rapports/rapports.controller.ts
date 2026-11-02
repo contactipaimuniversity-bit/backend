@@ -1,5 +1,7 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, Req, UseGuards } from '@nestjs/common';
+import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { acteurDe } from '../common/acteur';
 import { RapportsService } from './rapports.service';
 import { PeriodeRapportDto } from './dto/periode-rapport.dto';
 
@@ -34,13 +36,13 @@ export class RapportsController {
   }
 
   @Get('synthese')
-  synthese() {
-    return this.rapportsService.synthese();
+  synthese(@Req() request: AuthenticatedRequest) {
+    return this.rapportsService.syntheseVisible(acteurDe(request));
   }
 
   @Get('a-faire')
-  aFaire() {
-    return this.rapportsService.aFaire();
+  aFaire(@Req() request: AuthenticatedRequest) {
+    return this.rapportsService.aFaireVisible(acteurDe(request));
   }
 
   @Get('activite-periode')

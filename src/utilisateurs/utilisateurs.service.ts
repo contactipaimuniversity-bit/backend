@@ -143,13 +143,42 @@ export class UtilisateursService {
     const normalizedNom = nom?.trim();
     if (!normalizedNom)
       throw new BadRequestException('Le nom du poste est obligatoire');
+    const permissions = this.validPermissions(rawPermissions);
     try {
-      return await this.prisma.poste.update({
-        where: { id },
-        data: {
-          nom: normalizedNom,
-          permissions: this.validPermissions(rawPermissions),
-        },
+      return await this.prisma.$transaction(async (transaction) => {
+        const avant = await transaction.poste.findUnique({
+          where: { id },
+          select: { permissions: true },
+        });
+        if (!avant) throw new NotFoundException('Poste introuvable');
+        const poste = await transaction.poste.update({
+          where: { id },
+          data: { nom: normalizedNom, permissions },
+        });
+        // Seul l'écart s'applique aux titulaires : leurs droits individuels restent.
+        const ajoutes = permissions.filter(
+          (permission) => !avant.permissions.includes(permission),
+        );
+        const retires = avant.permissions.filter(
+          (permission) => !permissions.includes(permission),
+        );
+        const titulaires = await transaction.utilisateur.findMany({
+          where: { posteId: id },
+          select: { id: true, permissions: true },
+        });
+        for (const titulaire of titulaires)
+          await transaction.utilisateur.update({
+            where: { id: titulaire.id },
+            data: {
+              permissions: this.validPermissions([
+                ...titulaire.permissions.filter(
+                  (permission) => !retires.includes(permission),
+                ),
+                ...ajoutes,
+              ]),
+            },
+          });
+        return { ...poste, utilisateursMisAJour: titulaires.length };
       });
     } catch (error) {
       if (isUniqueConstraintViolation(error))

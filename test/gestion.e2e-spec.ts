@@ -2477,4 +2477,115 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .post('/paiements/remises', { ids: [annulation.id], statut: 'VALIDE' })
       .expect(409);
   });
+
+  it('ne donne à chacun que les cartes de la Vue d’ensemble attribuées à son poste', async () => {
+    const compte = await api('admin')
+      .post('/utilisateurs', {
+        nom: 'Cartes',
+        email: 'cartes@e2e.test',
+        motDePasse: 'Cartes1234!',
+        permissions: [
+          'view:dashboard-prospects',
+          'view:dashboard-unpaid',
+          'view:dashboard-recent-enrollments',
+        ],
+      })
+      .expect(201);
+    const connexion = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ email: 'cartes@e2e.test', motDePasse: 'Cartes1234!' })
+      .expect(201);
+    tokens.cartes = connexion.body.access_token;
+
+    const chiffres = await api('cartes').get('/rapports/synthese').expect(200);
+    expect(Object.keys(chiffres.body).sort()).toEqual([
+      'dernieresInscriptions',
+      'prospectsActifs',
+    ]);
+    expect(chiffres.body.dernieresInscriptions.length).toBeLessThanOrEqual(4);
+    const travail = await api('cartes').get('/rapports/a-faire').expect(200);
+    expect(Object.keys(travail.body)).toEqual(['impayes']);
+    // Le résumé de la journée est une rubrique à part.
+    await api('cartes')
+      .get(`/rapports/activite-journee?date=${jour}`)
+      .expect(403);
+
+    await api('admin')
+      .patch(`/utilisateurs/${compte.body.id}/acces`, {
+        posteId: null,
+        permissions: ['view:daily-summary'],
+      })
+      .expect(200);
+    await api('cartes')
+      .get(`/rapports/activite-journee?date=${jour}`)
+      .expect(200);
+    await api('cartes').get('/rapports/synthese').expect(403);
+    await api('cartes').get('/rapports/a-faire').expect(403);
+
+    // L'administrateur voit tout, et l'ancien droit n'existe plus.
+    const tout = await api('admin').get('/rapports/synthese').expect(200);
+    expect(tout.body.totalEncaisse).toBeDefined();
+    expect(tout.body.tendance).toHaveLength(6);
+    await api('admin')
+      .post('/utilisateurs/postes', {
+        nom: 'Ancien droit',
+        permissions: ['view:dashboard'],
+      })
+      .expect(400);
+  });
+
+  it('répercute un poste modifié sur ses titulaires et garde leurs droits individuels', async () => {
+    const poste = await api('admin')
+      .post('/utilisateurs/postes', {
+        nom: 'Caisse',
+        permissions: ['edit:payments'],
+      })
+      .expect(201);
+    const titulaire = await api('admin')
+      .post('/utilisateurs', {
+        nom: 'Caissier',
+        email: 'caissier@e2e.test',
+        motDePasse: 'Caissier123!',
+        posteId: poste.body.id,
+      })
+      .expect(201);
+    expect(titulaire.body.permissions.sort()).toEqual([
+      'edit:payments',
+      'view:payments',
+    ]);
+    await api('admin')
+      .patch(`/utilisateurs/${titulaire.body.id}/acces`, {
+        posteId: poste.body.id,
+        permissions: [...titulaire.body.permissions, 'view:reports'],
+      })
+      .expect(200);
+
+    const modifie = await api('admin')
+      .patch(`/utilisateurs/postes/${poste.body.id}`, {
+        nom: 'Caisse',
+        permissions: ['view:payments', 'view:prospects'],
+      })
+      .expect(200);
+    expect(modifie.body.utilisateursMisAJour).toBe(1);
+
+    // La session suit sans nouvelle connexion, et voit ses droits à jour.
+    const connexion = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ email: 'caissier@e2e.test', motDePasse: 'Caissier123!' })
+      .expect(201);
+    tokens.caissier = connexion.body.access_token;
+    const moi = await api('caissier').get('/auth/me').expect(200);
+    expect(moi.body.permissions.sort()).toEqual([
+      'view:payments',
+      'view:prospects',
+      'view:reports',
+    ]);
+    expect(moi.body.motDePasse).toBeUndefined();
+
+    // Le caissier retrouve le dossier à encaisser, sans pouvoir le modifier.
+    await api('caissier').get('/inscriptions').expect(200);
+    await api('caissier').get('/demandes-bourse').expect(200);
+    await api('caissier').post('/inscriptions', {}).expect(403);
+    await api('caissier').post('/paiements', {}).expect(403);
+  });
 });

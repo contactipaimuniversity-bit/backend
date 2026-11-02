@@ -59,4 +59,24 @@ export class AuthService {
       },
     };
   }
+
+  async profil(id: string) {
+    const utilisateur = await this.prisma.utilisateur.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        email: true,
+        role: true,
+        posteId: true,
+        poste: { select: { id: true, nom: true } },
+        permissions: true,
+        photoUrl: true,
+      },
+    });
+    if (!utilisateur)
+      throw new UnauthorizedException('Utilisateur introuvable');
+    return utilisateur;
+  }
 }

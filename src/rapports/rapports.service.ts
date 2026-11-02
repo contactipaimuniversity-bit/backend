@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client';
 import { resolveEntityLabels } from '../audit/entity-labels';
+import { Acteur, peut } from '../common/acteur';
 import { PrismaService } from '../prisma/prisma.service';
 import { PeriodeRapportDto } from './dto/periode-rapport.dto';
 
@@ -593,6 +594,82 @@ export class RapportsService {
       resteInscriptions: this.money(resteInscriptions),
       totalResteARecouvrer: this.money(resteBourses + resteInscriptions),
       tendance,
+    };
+  }
+
+  // Vue d'ensemble d'un utilisateur : uniquement les cartes attribuées à son poste.
+  async syntheseVisible(acteur: Acteur) {
+    const voit = (zone: string) => peut(acteur, `view:dashboard-${zone}`);
+    const personne = { select: { nom: true, prenom: true } };
+    const [synthese, dernieresDemandes, dernieresInscriptions] =
+      await Promise.all([
+        this.synthese(),
+        voit('recent-applications')
+          ? this.prisma.demandeBourse.findMany({
+              take: 5,
+              orderBy: { dateDepot: 'desc' },
+              select: {
+                id: true,
+                filiereSouhaitee: true,
+                statut: true,
+                dateDepot: true,
+                personne,
+              },
+            })
+          : undefined,
+        voit('recent-enrollments')
+          ? this.prisma.inscription.findMany({
+              take: 4,
+              orderBy: { dateInscription: 'desc' },
+              select: {
+                id: true,
+                filiere: true,
+                anneeScolaire: true,
+                dateInscription: true,
+                personne,
+              },
+            })
+          : undefined,
+      ]);
+    return {
+      ...(voit('trend') ? { tendance: synthese.tendance } : {}),
+      ...(voit('prospects')
+        ? { prospectsActifs: synthese.prospectsActifs }
+        : {}),
+      ...(voit('applications')
+        ? { demandesTotal: synthese.demandesTotal }
+        : {}),
+      ...(voit('applications-open')
+        ? { demandesEnCours: synthese.demandesEnCours }
+        : {}),
+      ...(voit('people') ? { effectifsTotal: synthese.effectifsTotal } : {}),
+      ...(voit('enrollments')
+        ? { inscriptionsTotal: synthese.inscriptionsTotal }
+        : {}),
+      ...(voit('collected') ? { totalEncaisse: synthese.totalEncaisse } : {}),
+      ...(voit('receivables')
+        ? {
+            resteBourses: synthese.resteBourses,
+            resteInscriptions: synthese.resteInscriptions,
+            totalResteARecouvrer: synthese.totalResteARecouvrer,
+          }
+        : {}),
+      ...(voit('scholarship-types')
+        ? { inscriptionsParType: synthese.inscriptionsParType }
+        : {}),
+      ...(dernieresDemandes ? { dernieresDemandes } : {}),
+      ...(dernieresInscriptions ? { dernieresInscriptions } : {}),
+    };
+  }
+
+  async aFaireVisible(acteur: Acteur) {
+    const voit = (zone: string) => peut(acteur, `view:dashboard-${zone}`);
+    const { relances, entretiens, incomplets, impayes } = await this.aFaire();
+    return {
+      ...(voit('followups') ? { relances } : {}),
+      ...(voit('interviews') ? { entretiens } : {}),
+      ...(voit('incomplete') ? { incomplets } : {}),
+      ...(voit('unpaid') ? { impayes } : {}),
     };
   }
 

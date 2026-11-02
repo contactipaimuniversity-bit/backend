@@ -1,5 +1,30 @@
+// Le détail de la Vue d'ensemble : chaque poste reçoit les cartes et blocs choisis.
+const DASHBOARD_FIGURE_AREAS = [
+  'dashboard-trend',
+  'dashboard-prospects',
+  'dashboard-applications',
+  'dashboard-applications-open',
+  'dashboard-people',
+  'dashboard-enrollments',
+  'dashboard-collected',
+  'dashboard-receivables',
+  'dashboard-scholarship-types',
+  'dashboard-recent-applications',
+  'dashboard-recent-enrollments',
+] as const;
+const DASHBOARD_WORKLIST_AREAS = [
+  'dashboard-followups',
+  'dashboard-interviews',
+  'dashboard-incomplete',
+  'dashboard-unpaid',
+] as const;
+
 export const ACCESS_AREAS = [
-  'dashboard',
+  ...DASHBOARD_FIGURE_AREAS,
+  ...DASHBOARD_WORKLIST_AREAS,
+  'dashboard-my-work',
+  'dashboard-incomplete-note',
+  'daily-summary',
   'scholarships',
   'enrollments',
   'certificates',
@@ -54,10 +79,13 @@ export function requiredPermissionForRequest(
 ): AccessPermission[] | null {
   const normalizedPath = path.split('?')[0].replace(/\/$/, '') || '/';
   const isRead = method.toUpperCase() === 'GET';
-  if (normalizedPath === '/rapports/synthese') return ['view:dashboard'];
-  if (normalizedPath === '/rapports/a-faire') return ['view:dashboard'];
+  // Le service ne renvoie ensuite que les cartes attribuées à l'utilisateur.
+  if (normalizedPath === '/rapports/synthese')
+    return DASHBOARD_FIGURE_AREAS.map((area) => `view:${area}` as const);
+  if (normalizedPath === '/rapports/a-faire')
+    return DASHBOARD_WORKLIST_AREAS.map((area) => `view:${area}` as const);
   if (normalizedPath === '/rapports/activite-journee')
-    return ['view:dashboard'];
+    return ['view:daily-summary'];
   if (isRead && normalizedPath === '/rapports/paiements-en-retard')
     return ['view:reports', 'view:payments'];
   if (isRead && normalizedPath === '/rapports/recouvrement')
@@ -265,7 +293,8 @@ export function requiredPermissionForRequest(
   if (!route) return null;
   const permission =
     `${isRead ? 'view' : 'edit'}:${route[1]}` as AccessPermission;
+  // La caisse choisit dans ces listes le dossier à encaisser.
   if (isRead && ['scholarships', 'enrollments'].includes(route[1]))
-    return [permission, 'view:certificates'];
+    return [permission, 'view:certificates', 'view:payments'];
   return [permission];
 }

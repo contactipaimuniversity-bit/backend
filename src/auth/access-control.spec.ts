@@ -1,26 +1,48 @@
 import { requiredPermissionForRequest } from './access-control';
 
 describe('requiredPermissionForRequest', () => {
-  it('uses the dashboard permission for its summary endpoint', () => {
-    expect(requiredPermissionForRequest('/rapports/synthese', 'GET')).toEqual([
-      'view:dashboard',
-    ]);
+  it('opens the dashboard figures to any of their cards', () => {
+    const required = requiredPermissionForRequest('/rapports/synthese', 'GET');
+    expect(required).toContain('view:dashboard-collected');
+    expect(required).toContain('view:dashboard-recent-enrollments');
+    expect(required).not.toContain('view:daily-summary');
+    expect(requiredPermissionForRequest('/rapports/a-faire', 'GET')).toContain(
+      'view:dashboard-unpaid',
+    );
   });
 
-  it('uses dashboard access for the daily recap endpoint', () => {
+  it('gives the daily recap its own right', () => {
     expect(
       requiredPermissionForRequest('/rapports/activite-journee', 'GET'),
-    ).toEqual(['view:dashboard']);
+    ).toEqual(['view:daily-summary']);
   });
 
   it('allows certificate access to read dossier records without edit access', () => {
     expect(requiredPermissionForRequest('/inscriptions/123', 'GET')).toEqual([
       'view:enrollments',
       'view:certificates',
+      'view:payments',
     ]);
     expect(requiredPermissionForRequest('/inscriptions/123', 'PATCH')).toEqual([
       'edit:enrollments',
     ]);
+  });
+
+  it('lets the cash desk find the dossier to collect without editing it', () => {
+    for (const path of ['/inscriptions', '/demandes-bourse', '/inscriptions/1'])
+      expect(requiredPermissionForRequest(path, 'GET')).toContain(
+        'view:payments',
+      );
+    expect(requiredPermissionForRequest('/inscriptions', 'POST')).toEqual([
+      'edit:enrollments',
+    ]);
+    expect(
+      requiredPermissionForRequest('/demandes-bourse/1', 'DELETE'),
+    ).toEqual(['edit:scholarships']);
+  });
+
+  it('opens the session profile to every signed-in user', () => {
+    expect(requiredPermissionForRequest('/auth/me', 'GET')).toBeNull();
   });
 
   it('requires a dedicated permission to cancel a payment', () => {
