@@ -2847,6 +2847,14 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     expect(inscrits[0].typeBourse).toBe('Bourse liste');
     const attente = await liste('&inscription=NON_INSCRITS');
     expect(attente.map((item: Body) => item.personne.nom)).toEqual(['Attente']);
+    // Une inscription abandonnée reste une inscription : il ne repasse pas « sans inscription ».
+    await api('admin')
+      .patch(`/inscriptions/${inscrits[0].inscription.id}`, {
+        statut: 'ABANDONNEE',
+      })
+      .expect(200);
+    const apres = await liste('&inscription=INSCRITS');
+    expect(apres[0].inscription.statut).toBe('ABANDONNEE');
     // Un autre type de bourse ne les montre pas, et le droit reste exigé.
     const autres = await api('admin')
       .get('/demandes-bourse/boursiers?typeBourseId=aucun')

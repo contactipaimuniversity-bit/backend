@@ -281,10 +281,12 @@ export class DemandesBourseService {
             tuteurTelephone: true,
           },
         },
+        // Inscrit = une inscription liée à la demande (« Inscription via une bourse »),
+        // même abandonnée : elle figure dans les inscriptions.
         inscriptions: {
-          where: { statut: { not: 'ABANDONNEE' } },
           select: {
             id: true,
+            statut: true,
             anneeScolaire: true,
             niveau: true,
             filiere: true,
