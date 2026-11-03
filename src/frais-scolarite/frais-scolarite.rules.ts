@@ -107,28 +107,90 @@ export function repartir<T extends LigneMois>(lignes: T[], verse: number) {
   });
 }
 
-// Nouveau plan d'un étudiant : ce qui est déjà payé, même en partie, ne change
-// jamais. À partir d'une date (retrait de bourse), les mois déjà échus restent aussi.
-export function fusionnerPlan<T extends LigneMois & { libelle: string }>(
+// Nouveau plan d'un étudiant, comparé à ses lignes actuelles :
+// - un mois soldé ne change jamais ;
+// - un mois entamé prend le nouveau montant, sans descendre sous ce qui est versé ;
+// - un mois absent du nouveau plan disparaît, et ce qui était versé dessus
+//   solde les mois suivants ;
+// - après un retrait de bourse, les mois déjà échus restent tels quels.
+export function fusionnerPlan<
+  T extends LigneMois & { id: string; libelle: string },
+>(
   lignes: T[],
   verse: number,
   cible: LigneCible[],
   aPartirDe: Date | null = null,
 ) {
-  const conservees = repartir(lignes, verse).filter(
-    (ligne) =>
-      ligne.paye > 0 ||
-      (aPartirDe !== null &&
-        ligne.dateLimite !== null &&
-        ligne.dateLimite < aPartirDe),
-  );
-  const libelles = new Set(conservees.map((ligne) => ligne.libelle));
+  const parLibelle = new Map(cible.map((ligne) => [ligne.libelle, ligne]));
+  const pris = new Set<string>();
+  const conservees: Array<T & { paye: number; reste: number }> = [];
+  const modifiees: Array<{
+    id: string;
+    montant: number;
+    dateLimite: Date | null;
+  }> = [];
+  const supprimees: string[] = [];
+  for (const ligne of repartir(lignes, verse)) {
+    const voulue = parLibelle.get(ligne.libelle);
+    const echue =
+      aPartirDe !== null &&
+      ligne.dateLimite !== null &&
+      ligne.dateLimite < aPartirDe;
+    if (pris.has(ligne.libelle) || (!voulue && !echue)) {
+      supprimees.push(ligne.id);
+      continue;
+    }
+    pris.add(ligne.libelle);
+    if (echue || !voulue || (ligne.paye > 0 && ligne.reste === 0)) {
+      conservees.push(ligne);
+      continue;
+    }
+    const montant = arrondir(Math.max(voulue.montant, ligne.paye));
+    const memeDate =
+      (ligne.dateLimite?.getTime() ?? null) ===
+      (voulue.dateLimite?.getTime() ?? null);
+    if (montant === ligne.montant && memeDate) conservees.push(ligne);
+    else
+      modifiees.push({ id: ligne.id, montant, dateLimite: voulue.dateLimite });
+  }
   const nouvelles = cible.filter(
     (ligne) =>
-      !libelles.has(ligne.libelle) &&
+      !pris.has(ligne.libelle) &&
       (aPartirDe === null ||
         ligne.dateLimite === null ||
         ligne.dateLimite >= aPartirDe),
   );
-  return { conservees, nouvelles };
+  return {
+    conservees,
+    modifiees,
+    nouvelles,
+    supprimees,
+    change: modifiees.length + nouvelles.length + supprimees.length > 0,
+  };
+}
+
+// ---------- Exceptions accordées à un étudiant ----------
+
+export const MODES_EXCEPTION = ['EXONERATION', 'POURCENTAGE', 'MONTANT'];
+
+export type Exception = { mode: string; valeur: number | null };
+
+// Exonérer : rien à payer ; pourcentage : réduit d'autant ; montant : ce montant-là.
+export function montantApresException(montant: number, exception: Exception) {
+  if (exception.mode === 'EXONERATION') return 0;
+  if (exception.mode === 'POURCENTAGE')
+    return reduit(montant, exception.valeur);
+  return arrondir(exception.valeur ?? montant);
+}
+
+export function avecExceptions(
+  cible: LigneCible[],
+  exceptions: Map<string, Exception>,
+): LigneCible[] {
+  return cible.map((ligne) => {
+    const exception = exceptions.get(ligne.libelle);
+    return exception
+      ? { ...ligne, montant: montantApresException(ligne.montant, exception) }
+      : ligne;
+  });
 }

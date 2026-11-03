@@ -3,6 +3,7 @@ import { verrouillerDossier } from '../paiements/encaissement';
 import type { PrismaService } from '../prisma/prisma.service';
 import {
   arrondir,
+  avecExceptions,
   fusionnerPlan,
   planCible,
   regimeDe,
@@ -48,47 +49,6 @@ export async function verseMensualites(client: Client, inscriptionId: string) {
   return Number(total._sum.montant ?? 0);
 }
 
-async function cibleDe(client: Client, inscription: InscriptionBourse) {
-  const [mois, tarifs] = await Promise.all([
-    client.moisScolarite.findMany({
-      where: { anneeScolaire: inscription.anneeScolaire },
-      orderBy: { ordre: 'asc' },
-    }),
-    client.tarifScolarite.findMany({ where: { niveau: inscription.niveau } }),
-  ]);
-  const bourse = bourseDe(inscription);
-  return planCible({
-    mois,
-    tarif: tarifDe(
-      tarifs.map((tarif) => ({
-        niveau: tarif.niveau,
-        filiereId: tarif.filiereId,
-        montantMensuel: Number(tarif.montantMensuel),
-      })),
-      inscription.niveau,
-      inscription.filiereId,
-    ),
-    bourse: bourse && {
-      nom: bourse.nom,
-      modeScolarite: bourse.modeScolarite,
-      tauxReduction:
-        bourse.tauxReduction === null ? null : Number(bourse.tauxReduction),
-      echeances: bourse.echeances.map((echeance) => ({
-        libelle: echeance.libelle,
-        dateEcheance: echeance.dateEcheance,
-        montantAttendu:
-          echeance.montantAttendu === null
-            ? null
-            : Number(echeance.montantAttendu),
-      })),
-    },
-    reductionIndividuelle:
-      inscription.reductionIndividuelle === null
-        ? null
-        : Number(inscription.reductionIndividuelle),
-  });
-}
-
 // Frais annexes du groupe de l'étudiant, s'ils ne sont pas déjà sur son échéancier.
 async function ajouterAnnexesDuGroupe(
   client: Client,
@@ -125,88 +85,205 @@ async function ajouterAnnexesDuGroupe(
   });
 }
 
-// Crée l'échéancier à la première lecture : l'inscription et le paramétrage
-// peuvent arriver dans n'importe quel ordre.
-export async function assurerEcheancier(
-  prisma: PrismaService,
-  inscriptionId: string,
-) {
-  const dejaFait = await prisma.ligneScolarite.count({
-    where: { inscriptionId, type: 'MENSUALITE' },
-  });
-  if (dejaFait) return;
-  await prisma.$transaction(async (transaction) => {
-    await verrouillerDossier(transaction, inscriptionId);
-    const inscription = await transaction.inscription.findUnique({
-      where: { id: inscriptionId },
-      include: inclureBourse,
-    });
-    if (!inscription || inscription.echeancierPersonnalise) return;
-    const existantes = await transaction.ligneScolarite.count({
-      where: { inscriptionId, type: 'MENSUALITE' },
-    });
-    if (existantes) return;
-    const cible = await cibleDe(transaction, inscription);
-    await transaction.ligneScolarite.createMany({
-      data: cible.map((ligne, index) => ({
-        inscriptionId,
-        type: 'MENSUALITE',
-        ordre: index + 1,
-        libelle: ligne.libelle,
-        dateLimite: ligne.dateLimite,
-        montant: arrondir(ligne.montant).toFixed(2),
+type Mois = { anneeScolaire: string; libelle: string; dateLimite: Date };
+type Tarif = {
+  niveau: string;
+  filiereId: string | null;
+  montantMensuel: Prisma.Decimal;
+};
+
+const enNombre = (valeur: Prisma.Decimal | null) =>
+  valeur === null ? null : Number(valeur);
+
+// Ce que l'étudiant devrait payer d'après le paramétrage du moment et ses exceptions.
+function cibleDe(inscription: InscriptionSync, mois: Mois[], tarifs: Tarif[]) {
+  const bourse = bourseDe(inscription);
+  const cible = planCible({
+    mois: mois.filter(
+      (item) => item.anneeScolaire === inscription.anneeScolaire,
+    ),
+    tarif: tarifDe(
+      tarifs.map((tarif) => ({
+        niveau: tarif.niveau,
+        filiereId: tarif.filiereId,
+        montantMensuel: Number(tarif.montantMensuel),
       })),
-    });
-    await ajouterAnnexesDuGroupe(transaction, inscription);
+      inscription.niveau,
+      inscription.filiereId,
+    ),
+    bourse: bourse && {
+      nom: bourse.nom,
+      modeScolarite: bourse.modeScolarite,
+      tauxReduction: enNombre(bourse.tauxReduction),
+      echeances: bourse.echeances.map((echeance) => ({
+        libelle: echeance.libelle,
+        dateEcheance: echeance.dateEcheance,
+        montantAttendu: enNombre(echeance.montantAttendu),
+      })),
+    },
+    reductionIndividuelle: enNombre(inscription.reductionIndividuelle),
+  });
+  return avecExceptions(
+    cible,
+    new Map(
+      inscription.exceptionsScolarite.flatMap((exception) =>
+        exception.mois
+          ? [
+              [
+                exception.mois,
+                { mode: exception.mode, valeur: enNombre(exception.valeur) },
+              ] as const,
+            ]
+          : [],
+      ),
+    ),
+  );
+}
+
+const inclureSync = {
+  ...inclureBourse,
+  exceptionsScolarite: {
+    where: { mois: { not: null } },
+    select: { mois: true, mode: true, valeur: true },
+  },
+  lignesScolarite: {
+    where: { type: 'MENSUALITE' },
+    select: {
+      id: true,
+      libelle: true,
+      dateLimite: true,
+      ordre: true,
+      montant: true,
+    },
+  },
+} satisfies Prisma.InscriptionInclude;
+
+type InscriptionSync = Prisma.InscriptionGetPayload<{
+  include: typeof inclureSync;
+}>;
+
+// Les échéanciers qui ne correspondent plus au paramétrage, avec ce qu'il faut
+// y changer. Les échéanciers retouchés à la main ne sont jamais touchés, et sans
+// calendrier ni tarif on ne retire rien.
+async function changementsDe(client: Client, ids?: string[]) {
+  // Lectures l'une après l'autre : dans une transaction, elles partagent une connexion.
+  const inscriptions = await client.inscription.findMany({
+    where: {
+      statut: { not: 'ABANDONNEE' },
+      echeancierPersonnalise: false,
+      ...(ids ? { id: { in: ids } } : {}),
+    },
+    include: inclureSync,
+  });
+  if (!inscriptions.length) return [];
+  const mois = await client.moisScolarite.findMany({
+    orderBy: { ordre: 'asc' },
+  });
+  const tarifs = await client.tarifScolarite.findMany();
+  const verses = await client.paiement.groupBy({
+    by: ['inscriptionId'],
+    where: {
+      typePaiement: 'MENSUALITE',
+      annulation: { is: null },
+      ...(ids ? { inscriptionId: { in: ids } } : {}),
+    },
+    _sum: { montant: true },
+  });
+  const verseDe = new Map(
+    verses.map((item) => [item.inscriptionId, Number(item._sum.montant ?? 0)]),
+  );
+  return inscriptions.flatMap((inscription) => {
+    const cible = cibleDe(inscription, mois, tarifs);
+    if (!cible.length) return [];
+    const plan = fusionnerPlan(
+      inscription.lignesScolarite.map((ligne) => ({
+        ...ligne,
+        montant: Number(ligne.montant),
+      })),
+      verseDe.get(inscription.id) ?? 0,
+      cible,
+      inscription.bourseRetireeLe,
+    );
+    return plan.change ? [{ inscription, plan }] : [];
   });
 }
 
-// Refait les mois d'après le paramétrage, sans toucher à ce qui est déjà payé.
-export async function recalculerEcheancier(
+async function appliquerChangements(
   client: Client,
-  inscriptionId: string,
-  aPartirDe: Date | null = null,
+  changements: Awaited<ReturnType<typeof changementsDe>>,
 ) {
-  await verrouillerDossier(client, inscriptionId);
-  const inscription = await client.inscription.findUnique({
-    where: { id: inscriptionId },
-    include: inclureBourse,
-  });
-  if (!inscription) return;
-  const lignes = await client.ligneScolarite.findMany({
-    where: { inscriptionId, type: 'MENSUALITE' },
-  });
-  const { conservees, nouvelles } = fusionnerPlan(
-    lignes.map((ligne) => ({
-      id: ligne.id,
-      libelle: ligne.libelle,
-      dateLimite: ligne.dateLimite,
-      ordre: ligne.ordre,
-      montant: Number(ligne.montant),
-    })),
-    await verseMensualites(client, inscriptionId),
-    await cibleDe(client, inscription),
-    aPartirDe,
-  );
-  await client.ligneScolarite.deleteMany({
-    where: {
-      inscriptionId,
-      type: 'MENSUALITE',
-      id: { notIn: conservees.map((ligne) => ligne.id) },
-    },
-  });
-  const dernierOrdre = Math.max(0, ...conservees.map((ligne) => ligne.ordre));
-  await client.ligneScolarite.createMany({
-    data: nouvelles.map((ligne, index) => ({
-      inscriptionId,
+  const supprimees = changements.flatMap(({ plan }) => plan.supprimees);
+  if (supprimees.length)
+    await client.ligneScolarite.deleteMany({
+      where: { id: { in: supprimees } },
+    });
+  for (const { plan } of changements)
+    for (const ligne of plan.modifiees)
+      await client.ligneScolarite.update({
+        where: { id: ligne.id },
+        data: {
+          montant: ligne.montant.toFixed(2),
+          dateLimite: ligne.dateLimite,
+        },
+      });
+  const nouvelles = changements.flatMap(({ inscription, plan }) => {
+    const dernierOrdre = Math.max(
+      0,
+      ...inscription.lignesScolarite.map((ligne) => ligne.ordre),
+    );
+    return plan.nouvelles.map((ligne, index) => ({
+      inscriptionId: inscription.id,
       type: 'MENSUALITE',
       ordre: dernierOrdre + index + 1,
       libelle: ligne.libelle,
       dateLimite: ligne.dateLimite,
       montant: arrondir(ligne.montant).toFixed(2),
-    })),
+    }));
   });
+  if (nouvelles.length)
+    await client.ligneScolarite.createMany({ data: nouvelles });
+  // Un échéancier tout neuf reçoit aussi les frais annexes de son groupe.
+  for (const { inscription } of changements)
+    if (!inscription.lignesScolarite.length)
+      await ajouterAnnexesDuGroupe(client, inscription);
 }
+
+// Un seul recalcul à la fois : deux lectures simultanées ne doublent pas les mois.
+const VERROU_ECHEANCIERS = 'echeanciers-scolarite';
+
+// Met les échéanciers d'accord avec le paramétrage, dans une transaction ouverte.
+export async function recalculerEcheanciers(client: Client, ids?: string[]) {
+  await verrouillerDossier(client, VERROU_ECHEANCIERS);
+  const changements = await changementsDe(client, ids);
+  await appliquerChangements(client, changements);
+  return changements.length;
+}
+
+export const recalculerEcheancier = (client: Client, inscriptionId: string) =>
+  recalculerEcheanciers(client, [inscriptionId]);
+
+// Le paramétrage s'applique tout seul : à chaque enregistrement et à chaque
+// lecture. Rien n'est écrit quand tout est déjà à jour.
+export async function synchroniserEcheanciers(
+  prisma: PrismaService,
+  ids?: string[],
+) {
+  const aFaire = await changementsDe(prisma, ids);
+  if (!aFaire.length) return 0;
+  return prisma.$transaction(
+    (transaction) =>
+      recalculerEcheanciers(
+        transaction,
+        aFaire.map(({ inscription }) => inscription.id),
+      ),
+    { maxWait: 15_000, timeout: 60_000 },
+  );
+}
+
+export const assurerEcheancier = (
+  prisma: PrismaService,
+  inscriptionId: string,
+) => synchroniserEcheanciers(prisma, [inscriptionId]);
 
 export async function appliquerAnnexeAuGroupe(
   client: Client,
@@ -244,9 +321,36 @@ export async function situationScolarite(
         include: { paiements: { select: { montant: true } } },
         orderBy: { ordre: 'asc' },
       },
+      exceptionsScolarite: true,
+      elementsDossier: {
+        where: { montantAttendu: { not: null } },
+        include: {
+          elementRequis: { select: { nom: true } },
+          paiements: { select: { montant: true } },
+        },
+        orderBy: { elementRequis: { nom: 'asc' } },
+      },
     },
   });
   if (!inscription) return null;
+  const exceptionDe = (
+    exception: (typeof inscription.exceptionsScolarite)[number] | undefined,
+  ) =>
+    exception
+      ? {
+          id: exception.id,
+          mode: exception.mode,
+          valeur: enNombre(exception.valeur),
+          montantInitial: Number(exception.montantInitial),
+          motif: exception.motif,
+          parNom: exception.parNom,
+          le: exception.le,
+        }
+      : null;
+  const exceptionDuMois = (libelle: string) =>
+    exceptionDe(
+      inscription.exceptionsScolarite.find((item) => item.mois === libelle),
+    );
   const verse = await verseMensualites(prisma, inscriptionId);
   const mensualites = repartir(
     inscription.lignesScolarite
@@ -259,7 +363,28 @@ export async function situationScolarite(
         montant: Number(ligne.montant),
       })),
     verse,
-  );
+  ).map((ligne) => ({ ...ligne, exception: exceptionDuMois(ligne.libelle) }));
+  const fraisInscription = inscription.elementsDossier.map((element) => {
+    const montant = Number(element.montantAttendu);
+    const paye = arrondir(
+      element.paiements.reduce(
+        (total, paiement) => total + Number(paiement.montant),
+        0,
+      ),
+    );
+    return {
+      id: element.id,
+      libelle: element.elementRequis.nom,
+      montant,
+      paye,
+      reste: arrondir(Math.max(0, montant - paye)),
+      exception: exceptionDe(
+        inscription.exceptionsScolarite.find(
+          (item) => item.elementDossierId === element.id,
+        ),
+      ),
+    };
+  });
   const annexes = inscription.lignesScolarite
     .filter((ligne) => ligne.type === 'ANNEXE')
     .map((ligne) => {
@@ -304,6 +429,11 @@ export async function situationScolarite(
     bourseRetiree: inscription.bourseRetireeLe !== null,
     mensualites,
     annexes,
+    fraisInscription,
+    // Versé au-delà de tous les mois (un mois retiré après paiement, par exemple).
+    tropPercu: arrondir(
+      Math.max(0, verse - somme(mensualites.map((ligne) => ligne.montant))),
+    ),
     resteMensualites: somme(mensualites.map((ligne) => ligne.reste)),
     resteAnnexes: somme(annexes.map((ligne) => ligne.reste)),
     resteTotal: somme([...mensualites, ...annexes].map((ligne) => ligne.reste)),
@@ -436,44 +566,9 @@ export async function retardsScolarite(
   });
 }
 
-// Seuls les dossiers qui peuvent vraiment recevoir un échéancier sont traités :
-// sans calendrier ni tarif, rien n'est à créer et aucune écriture n'est tentée.
+// Tous les échéanciers d'accord avec le paramétrage, avant un rapport.
 export async function assurerTousLesEcheanciers(prisma: PrismaService) {
-  const [mois, tarifs] = await Promise.all([
-    prisma.moisScolarite.findMany({
-      distinct: ['anneeScolaire'],
-      select: { anneeScolaire: true },
-    }),
-    prisma.tarifScolarite.findMany({
-      distinct: ['niveau'],
-      select: { niveau: true },
-    }),
-  ]);
-  const sansLignes = await prisma.inscription.findMany({
-    where: {
-      statut: { not: 'ABANDONNEE' },
-      echeancierPersonnalise: false,
-      lignesScolarite: { none: { type: 'MENSUALITE' } },
-      OR: [
-        {
-          anneeScolaire: { in: mois.map((item) => item.anneeScolaire) },
-          niveau: { in: tarifs.map((item) => item.niveau) },
-        },
-        {
-          bourseRetireeLe: null,
-          demandeBourse: {
-            statut: 'ACCEPTEE',
-            typeBourse: {
-              modeScolarite: 'MOIS_FIXES',
-              echeances: { some: {} },
-            },
-          },
-        },
-      ],
-    },
-    select: { id: true },
-  });
-  for (const { id } of sansLignes) await assurerEcheancier(prisma, id);
+  await synchroniserEcheanciers(prisma);
 }
 
 // Reste à recouvrer sur toute la scolarité (bourses et inscriptions ont le leur).

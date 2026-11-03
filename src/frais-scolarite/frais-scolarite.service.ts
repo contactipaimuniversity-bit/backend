@@ -4,20 +4,27 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import type { Prisma } from '../../generated/prisma/client';
 import { niveauxConnus } from '../academique/niveaux';
 import { isUniqueConstraintViolation } from '../common/prisma-errors';
 import { verrouillerDossier } from '../paiements/encaissement';
 import { PrismaService } from '../prisma/prisma.service';
-import { arrondir, repartir } from './frais-scolarite.rules';
+import {
+  arrondir,
+  MODES_EXCEPTION,
+  montantApresException,
+  repartir,
+} from './frais-scolarite.rules';
 import {
   appliquerAnnexeAuGroupe,
-  assurerTousLesEcheanciers,
   recalculerEcheancier,
   situationScolarite,
+  synchroniserEcheanciers,
   verseMensualites,
 } from './frais-scolarite.situation';
 
 type Body = Record<string, unknown>;
+type Client = Prisma.TransactionClient;
 
 const MODES_BOURSE = ['REDUCTION', 'MOIS_FIXES'];
 const VERIFICATIONS = ['SEMESTRE', 'ANNEE'];
@@ -146,6 +153,7 @@ export class FraisScolariteService {
       this.prisma.moisScolarite.deleteMany({ where: { anneeScolaire } }),
       this.prisma.moisScolarite.createMany({ data: mois }),
     ]);
+    await synchroniserEcheanciers(this.prisma);
     return this.parametres(anneeScolaire);
   }
 
@@ -171,6 +179,7 @@ export class FraisScolariteService {
       this.prisma.tarifScolarite.deleteMany(),
       this.prisma.tarifScolarite.createMany({ data: tarifs }),
     ]);
+    await synchroniserEcheanciers(this.prisma);
     return this.prisma.tarifScolarite.findMany();
   }
 
@@ -251,7 +260,7 @@ export class FraisScolariteService {
   async modifierBourse(id: string, body: Body) {
     const { echeances, ...data } = this.lireBourse(body);
     try {
-      return await this.prisma.$transaction(async (transaction) => {
+      const bourse = await this.prisma.$transaction(async (transaction) => {
         const type = await transaction.typeBourse.findUnique({ where: { id } });
         if (!type) throw new NotFoundException('Bourse introuvable');
         await transaction.typeBourse.update({ where: { id }, data });
@@ -279,6 +288,8 @@ export class FraisScolariteService {
           include: { echeances: { orderBy: { ordre: 'asc' } } },
         });
       });
+      await synchroniserEcheanciers(this.prisma);
+      return bourse;
     } catch (error) {
       if (isUniqueConstraintViolation(error))
         throw new ConflictException('Cette bourse existe déjà');
@@ -372,19 +383,7 @@ export class FraisScolariteService {
   // Refait les mois non payés des étudiants, sauf les échéanciers retouchés à la main.
   async appliquer(body: Body) {
     const anneeScolaire = texte(body.anneeScolaire, "L'année scolaire");
-    await assurerTousLesEcheanciers(this.prisma);
-    const inscriptions = await this.prisma.inscription.findMany({
-      where: {
-        anneeScolaire,
-        statut: { not: 'ABANDONNEE' },
-        echeancierPersonnalise: false,
-      },
-      select: { id: true },
-    });
-    for (const { id } of inscriptions)
-      await this.prisma.$transaction((transaction) =>
-        recalculerEcheancier(transaction, id),
-      );
+    const misAJour = await synchroniserEcheanciers(this.prisma);
     const personnalises = await this.prisma.inscription.count({
       where: {
         anneeScolaire,
@@ -392,7 +391,7 @@ export class FraisScolariteService {
         echeancierPersonnalise: true,
       },
     });
-    return { misAJour: inscriptions.length, personnalises };
+    return { misAJour, personnalises };
   }
 
   // ---------- Conservation de la bourse ----------
@@ -498,7 +497,7 @@ export class FraisScolariteService {
             where: { id: inscriptionId },
             data: { bourseRetireeLe: maintenant },
           });
-          await recalculerEcheancier(transaction, inscriptionId, maintenant);
+          await recalculerEcheancier(transaction, inscriptionId);
         }
         return { inscriptionId, decision };
       });
@@ -726,7 +725,7 @@ export class FraisScolariteService {
         where: { id },
         data: { bourseRetireeLe: null },
       });
-      await recalculerEcheancier(transaction, id, new Date());
+      await recalculerEcheancier(transaction, id);
     });
     return this.situation(id);
   }
@@ -755,5 +754,155 @@ export class FraisScolariteService {
       throw error;
     }
     return this.situation(id);
+  }
+
+  // ---------- Exceptions ----------
+
+  private lireException(body: Body) {
+    const mode = texte(body.mode, 'Le type d’exception');
+    if (!MODES_EXCEPTION.includes(mode))
+      throw new BadRequestException('Type d’exception inconnu');
+    const valeur =
+      mode === 'POURCENTAGE'
+        ? pourcentage(body.valeur, 'La réduction')
+        : mode === 'MONTANT'
+          ? montantValide(body.valeur, 'Le montant')
+          : null;
+    if (mode === 'POURCENTAGE' && !valeur)
+      throw new BadRequestException('Indiquez une réduction supérieure à 0 %');
+    return { mode, valeur, motif: texte(body.motif, 'Le motif', 300) };
+  }
+
+  // Sur un mois (désigné par son nom) ou sur un frais d'inscription du dossier.
+  async accorderException(id: string, body: Body, auteur: string) {
+    const exception = this.lireException(body);
+    const elementDossierId =
+      typeof body.elementDossierId === 'string' ? body.elementDossierId : '';
+    const cible = elementDossierId
+      ? await this.fraisInscriptionDe(id, elementDossierId)
+      : await this.moisDe(id, texte(body.mois, 'Le mois'));
+    if (cible.exception)
+      throw new ConflictException(
+        'Cette ligne a déjà une exception : retirez-la d’abord',
+      );
+    if (cible.paye > 0 && cible.reste === 0)
+      throw new BadRequestException('Cette ligne est déjà entièrement payée');
+    const montant = montantApresException(cible.montant, exception);
+    if (montant > cible.montant)
+      throw new BadRequestException(
+        `Le montant fixé dépasse ce qui est dû (${cible.montant} F)`,
+      );
+    if (montant < cible.paye)
+      throw new BadRequestException(
+        `${cible.paye} F ont déjà été versés sur cette ligne : le montant ne peut pas descendre en dessous`,
+      );
+    try {
+      await this.prisma.$transaction(async (transaction) => {
+        await verrouillerDossier(transaction, id);
+        await transaction.exceptionScolarite.create({
+          data: {
+            inscriptionId: id,
+            mois: elementDossierId ? null : cible.libelle,
+            elementDossierId: elementDossierId || null,
+            mode: exception.mode,
+            valeur:
+              exception.valeur === null ? null : exception.valeur.toFixed(2),
+            montantInitial: cible.montant.toFixed(2),
+            motif: exception.motif,
+            parNom: auteur,
+          },
+        });
+        await this.appliquerMontant(transaction, id, cible, montant);
+      });
+    } catch (error) {
+      if (isUniqueConstraintViolation(error))
+        throw new ConflictException(
+          'Cette ligne a déjà une exception : retirez-la d’abord',
+        );
+      throw error;
+    }
+    return this.situation(id);
+  }
+
+  // On revient au montant d'avant, tant que rien n'a été payé sur la ligne.
+  async retirerException(id: string, exceptionId: string) {
+    const exception = await this.prisma.exceptionScolarite.findFirst({
+      where: { id: exceptionId, inscriptionId: id },
+    });
+    if (!exception) throw new NotFoundException('Exception introuvable');
+    const cible = exception.elementDossierId
+      ? await this.fraisInscriptionDe(id, exception.elementDossierId)
+      : await this.moisDe(id, exception.mois ?? '', false);
+    if (cible.paye > 0)
+      throw new BadRequestException(
+        'Un paiement a déjà été reçu sur cette ligne : l’exception ne peut plus être retirée',
+      );
+    await this.prisma.$transaction(async (transaction) => {
+      await verrouillerDossier(transaction, id);
+      await transaction.exceptionScolarite.delete({
+        where: { id: exceptionId },
+      });
+      await this.appliquerMontant(
+        transaction,
+        id,
+        cible,
+        Number(exception.montantInitial),
+      );
+    });
+    return this.situation(id);
+  }
+
+  private async moisDe(id: string, libelle: string, obligatoire = true) {
+    const situation = await this.situation(id);
+    const ligne = situation.mensualites.find(
+      (item) => item.libelle === libelle,
+    );
+    if (!ligne && obligatoire) throw new NotFoundException('Mois introuvable');
+    return {
+      type: 'MOIS' as const,
+      id: ligne?.id ?? null,
+      libelle,
+      montant: ligne?.montant ?? 0,
+      paye: ligne?.paye ?? 0,
+      reste: ligne?.reste ?? 0,
+      exception: ligne?.exception ?? null,
+      personnalise: situation.personnalise,
+    };
+  }
+
+  private async fraisInscriptionDe(id: string, elementDossierId: string) {
+    const situation = await this.situation(id);
+    const frais = situation.fraisInscription.find(
+      (item) => item.id === elementDossierId,
+    );
+    if (!frais) throw new NotFoundException('Frais introuvable');
+    return {
+      type: 'FRAIS' as const,
+      ...frais,
+      personnalise: situation.personnalise,
+    };
+  }
+
+  // Un échéancier qui suit le paramétrage est recalculé (l'exception y est prise
+  // en compte) ; un échéancier personnalisé et les frais d'inscription sont
+  // modifiés directement.
+  private async appliquerMontant(
+    transaction: Client,
+    id: string,
+    cible: { type: 'MOIS' | 'FRAIS'; id: string | null; personnalise: boolean },
+    montant: number,
+  ) {
+    if (cible.type === 'FRAIS') {
+      if (cible.id)
+        await transaction.elementDossier.update({
+          where: { id: cible.id },
+          data: { montantAttendu: montant.toFixed(2) },
+        });
+    } else if (!cible.personnalise) await recalculerEcheancier(transaction, id);
+    else if (cible.id)
+      await transaction.ligneScolarite.update({
+        where: { id: cible.id },
+        data: { montant: montant.toFixed(2) },
+      });
   }
 }

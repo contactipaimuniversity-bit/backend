@@ -122,6 +122,23 @@ export class FraisScolariteController {
     return this.service.modifierLigne(id, ligneId, body);
   }
 
+  @Post('inscriptions/:id/exceptions')
+  accorderException(
+    @Param('id') id: string,
+    @Body() body: Corps,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.accorderException(id, body, acteurDe(request).nom);
+  }
+
+  @Delete('inscriptions/:id/exceptions/:exceptionId')
+  retirerException(
+    @Param('id') id: string,
+    @Param('exceptionId') exceptionId: string,
+  ) {
+    return this.service.retirerException(id, exceptionId);
+  }
+
   @Delete('inscriptions/:id/lignes/:ligneId')
   retirerLigne(@Param('id') id: string, @Param('ligneId') ligneId: string) {
     return this.service.retirerLigne(id, ligneId);

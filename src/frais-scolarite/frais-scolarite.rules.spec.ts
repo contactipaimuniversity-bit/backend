@@ -1,5 +1,7 @@
 import {
+  avecExceptions,
   fusionnerPlan,
+  montantApresException,
   planCible,
   regimeDe,
   repartir,
@@ -18,6 +20,7 @@ const ligne = (
   ordre: number,
   montant: number,
 ) => ({
+  id: libelle,
   libelle,
   dateLimite: date(jour),
   ordre,
@@ -130,26 +133,95 @@ describe('fusionnerPlan', () => {
   ];
   const cible = mois.map((item) => ({ ...item, montant: 30000 }));
 
-  it('never changes a month already paid, even in part', () => {
-    const { conservees, nouvelles } = fusionnerPlan(lignes, 20000, cible);
-    expect(conservees.map((item) => item.libelle)).toEqual([
-      'Octobre',
-      'Novembre',
+  it('never changes a settled month, and raises the one paid in part', () => {
+    const plan = fusionnerPlan(lignes, 20000, cible);
+    expect(plan.conservees.map((item) => item.libelle)).toEqual(['Octobre']);
+    expect(plan.modifiees).toEqual([
+      { id: 'Novembre', montant: 30000, dateLimite: date('2026-11-05') },
+      { id: 'Décembre', montant: 30000, dateLimite: date('2026-12-05') },
     ]);
-    expect(nouvelles.map((item) => [item.libelle, item.montant])).toEqual([
-      ['Décembre', 30000],
+    expect(plan.nouvelles).toEqual([]);
+    expect(plan.supprimees).toEqual([]);
+  });
+
+  it('never lowers a month below what was already paid on it', () => {
+    const plan = fusionnerPlan(
+      lignes,
+      25000,
+      cible.map((item) => ({ ...item, montant: 8000 })),
+    );
+    expect(plan.conservees.map((item) => item.libelle)).toEqual(['Octobre']);
+    expect(plan.modifiees[0]).toEqual({
+      id: 'Novembre',
+      montant: 10000,
+      dateLimite: date('2026-11-05'),
+    });
+  });
+
+  it('writes nothing when the plan already matches the settings', () => {
+    const plan = fusionnerPlan(
+      lignes,
+      20000,
+      mois.map((item) => ({ ...item, montant: 15000 })),
+    );
+    expect(plan.change).toBe(false);
+  });
+
+  it('follows a new calendar: removed months go, new ones come, dates move', () => {
+    const plan = fusionnerPlan(lignes, 0, [
+      { libelle: 'Novembre', dateLimite: date('2026-11-10'), montant: 15000 },
+      { libelle: 'Janvier', dateLimite: date('2027-01-05'), montant: 15000 },
     ]);
+    expect(plan.supprimees).toEqual(['Octobre', 'Décembre']);
+    expect(plan.modifiees).toEqual([
+      { id: 'Novembre', montant: 15000, dateLimite: date('2026-11-10') },
+    ]);
+    expect(plan.nouvelles.map((item) => item.libelle)).toEqual(['Janvier']);
+  });
+
+  it('drops a paid month that the new plan no longer has: the money moves on', () => {
+    const plan = fusionnerPlan(lignes, 15000, [
+      { libelle: 'Tranche 1', dateLimite: date('2026-10-15'), montant: 50000 },
+    ]);
+    expect(plan.supprimees).toEqual(['Octobre', 'Novembre', 'Décembre']);
+    expect(plan.nouvelles.map((item) => item.libelle)).toEqual(['Tranche 1']);
   });
 
   it('keeps the months already due when a scholarship is withdrawn', () => {
-    const { conservees, nouvelles } = fusionnerPlan(
-      lignes,
+    const plan = fusionnerPlan(lignes, 0, cible, date('2026-11-20'));
+    expect(plan.conservees.map((item) => item.montant)).toEqual([15000, 15000]);
+    expect(plan.modifiees.map((item) => item.id)).toEqual(['Décembre']);
+  });
+
+  it('removes a duplicated month', () => {
+    const plan = fusionnerPlan(
+      [...lignes, { ...ligne('Octobre', '2026-10-05', 4, 15000), id: 'bis' }],
       0,
-      cible,
-      date('2026-11-20'),
+      mois.map((item) => ({ ...item, montant: 15000 })),
     );
-    expect(conservees.map((item) => item.montant)).toEqual([15000, 15000]);
-    expect(nouvelles.map((item) => item.libelle)).toEqual(['Décembre']);
+    expect(plan.supprimees).toEqual(['bis']);
+  });
+});
+
+describe('exceptions', () => {
+  it('exempts, reduces or fixes the amount of a line', () => {
+    expect(
+      montantApresException(30000, { mode: 'EXONERATION', valeur: null }),
+    ).toBe(0);
+    expect(
+      montantApresException(30000, { mode: 'POURCENTAGE', valeur: 50 }),
+    ).toBe(15000);
+    expect(
+      montantApresException(30000, { mode: 'MONTANT', valeur: 20000 }),
+    ).toBe(20000);
+  });
+
+  it('applies to the month it names, on top of the scholarship', () => {
+    const cible = avecExceptions(
+      mois.map((item) => ({ ...item, montant: 15000 })),
+      new Map([['Novembre', { mode: 'POURCENTAGE', valeur: 50 }]]),
+    );
+    expect(cible.map((item) => item.montant)).toEqual([15000, 7500, 15000]);
   });
 });
 

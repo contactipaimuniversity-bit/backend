@@ -2794,6 +2794,292 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .expect(403);
   });
 
+  it('applique tout de suite le paramétrage aux échéanciers, avec les exceptions accordées', async () => {
+    const anneeScolarite = '2031-2032';
+    const prisma = app.get(
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('../src/prisma/prisma.service').PrismaService,
+    );
+    const plan = async (id: string) =>
+      (
+        await api('admin')
+          .get(`/frais-scolarite/inscriptions/${id}`)
+          .expect(200)
+      ).body;
+    // Ce qui est en base, sans passer par la lecture qui met à jour.
+    const enBase = async (id: string) =>
+      (
+        await prisma.ligneScolarite.findMany({
+          where: { inscriptionId: id, type: 'MENSUALITE' },
+          orderBy: { dateLimite: 'asc' },
+        })
+      ).map((ligne: Body) => [ligne.libelle, Number(ligne.montant)]);
+    const tarifs = (filiere: number) =>
+      api('admin')
+        .put('/frais-scolarite/tarifs', {
+          tarifs: [
+            { niveau: 'L1', filiereId: null, montantMensuel: 30000 },
+            { niveau: 'L1', filiereId: ids.filiere, montantMensuel: filiere },
+          ],
+        })
+        .expect(200);
+    const parametres = (
+      await api('admin')
+        .get(`/frais-scolarite/parametres?anneeScolaire=${anneeScolarite}`)
+        .expect(200)
+    ).body;
+    const moisActuels = parametres.mois.map((item: Body) => ({
+      libelle: item.libelle,
+      dateLimite: String(item.dateLimite).slice(0, 10),
+    }));
+
+    const id = (
+      await api('admin')
+        .post('/inscriptions', {
+          nouvellePersonne: { nom: 'Regles', prenom: 'Sco' },
+          anneeScolaire: anneeScolarite,
+          niveau: 'L1',
+          filiere: 'Informatique',
+        })
+        .expect(201)
+    ).body.id as string;
+    expect((await plan(id)).mensualites).toHaveLength(4);
+    // Octobre soldé, Novembre entamé.
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: id,
+        montant: 45000,
+        typePaiement: 'MENSUALITE',
+      })
+      .expect(201);
+
+    // Nouveau tarif : appliqué dès l'enregistrement, sauf au mois déjà soldé.
+    await tarifs(40000);
+    expect(await enBase(id)).toEqual([
+      ['Octobre', 35000],
+      ['Novembre', 40000],
+      ['Décembre', 40000],
+      ['Janvier', 40000],
+    ]);
+    let situation = await plan(id);
+    expect(situation.mensualites[1]).toMatchObject({
+      paye: 10000,
+      reste: 30000,
+    });
+
+    // Un mois ajouté au calendrier arrive aussitôt sur l'échéancier.
+    await api('admin')
+      .put('/frais-scolarite/calendrier', {
+        anneeScolaire: anneeScolarite,
+        mois: [
+          ...moisActuels,
+          { libelle: 'Février', dateLimite: '2099-02-05' },
+        ],
+      })
+      .expect(200);
+    expect((await enBase(id)).map(([libelle]: [string]) => libelle)).toContain(
+      'Février',
+    );
+    await api('admin')
+      .put('/frais-scolarite/calendrier', {
+        anneeScolaire: anneeScolarite,
+        mois: moisActuels,
+      })
+      .expect(200);
+    expect(await enBase(id)).toHaveLength(4);
+
+    // Exception sur un mois : motif obligatoire, auteur retenu.
+    const exception = (corps: Body) =>
+      api('admin').post(
+        `/frais-scolarite/inscriptions/${id}/exceptions`,
+        corps,
+      );
+    await exception({
+      mois: 'Décembre',
+      mode: 'POURCENTAGE',
+      valeur: 50,
+    }).expect(400);
+    situation = (
+      await exception({
+        mois: 'Décembre',
+        mode: 'POURCENTAGE',
+        valeur: 50,
+        motif: 'Difficultés familiales',
+      }).expect(201)
+    ).body;
+    const decembre = situation.mensualites.find(
+      (ligne: Body) => ligne.libelle === 'Décembre',
+    );
+    expect(decembre.montant).toBe(20000);
+    expect(decembre.exception).toMatchObject({
+      mode: 'POURCENTAGE',
+      valeur: 50,
+      motif: 'Difficultés familiales',
+    });
+    expect(decembre.exception.parNom).toBeTruthy();
+    await exception({
+      mois: 'Décembre',
+      mode: 'EXONERATION',
+      motif: 'Doublon',
+    }).expect(409);
+    // Un mois soldé ne prend pas d'exception ; un mois entamé ne descend pas sous le versé.
+    await exception({
+      mois: 'Octobre',
+      mode: 'EXONERATION',
+      motif: 'x',
+    }).expect(400);
+    await exception({
+      mois: 'Novembre',
+      mode: 'MONTANT',
+      valeur: 5000,
+      motif: 'x',
+    }).expect(400);
+    await exception({
+      mois: 'Novembre',
+      mode: 'MONTANT',
+      valeur: 90000,
+      motif: 'x',
+    }).expect(400);
+    situation = (
+      await exception({
+        mois: 'Janvier',
+        mode: 'EXONERATION',
+        motif: 'Major de promotion',
+      }).expect(201)
+    ).body;
+    expect(situation.mensualites[3]).toMatchObject({ montant: 0, reste: 0 });
+
+    // L'exception survit à un changement de tarif.
+    await tarifs(36000);
+    expect(await enBase(id)).toEqual([
+      ['Octobre', 35000],
+      ['Novembre', 36000],
+      ['Décembre', 18000],
+      ['Janvier', 0],
+    ]);
+
+    // Compléter Novembre : le reste exact solde le mois, pas un franc de plus.
+    situation = await plan(id);
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: id,
+        montant: situation.mensualites[1].reste + 18000 + 1,
+        typePaiement: 'MENSUALITE',
+      })
+      .expect(400);
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: id,
+        montant: situation.mensualites[1].reste,
+        typePaiement: 'MENSUALITE',
+      })
+      .expect(201);
+    situation = await plan(id);
+    expect(situation.mensualites[1]).toMatchObject({ reste: 0 });
+    expect(situation.resteMensualites).toBe(18000);
+
+    // Retour en arrière : possible tant que rien n'est payé sur la ligne.
+    situation = (
+      await api('admin')
+        .delete(
+          `/frais-scolarite/inscriptions/${id}/exceptions/${situation.mensualites[3].exception.id}`,
+        )
+        .expect(200)
+    ).body;
+    expect(situation.mensualites[3]).toMatchObject({
+      montant: 36000,
+      exception: null,
+    });
+
+    // Frais d'inscription : réduit puis payé en partie, l'exception reste acquise.
+    const frais = situation.fraisInscription[0];
+    expect(frais.montant).toBe(50000);
+    situation = (
+      await exception({
+        elementDossierId: frais.id,
+        mode: 'POURCENTAGE',
+        valeur: 40,
+        motif: 'Fratrie inscrite',
+      }).expect(201)
+    ).body;
+    expect(situation.fraisInscription[0]).toMatchObject({
+      montant: 30000,
+      exception: { motif: 'Fratrie inscrite' },
+    });
+    const finance = await api('admin')
+      .get(`/inscriptions/${id}/finance`)
+      .expect(200);
+    expect(
+      Number(
+        finance.body.obligations.find((item: Body) => item.id === frais.id)
+          .montantAttendu,
+      ),
+    ).toBe(30000);
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: id,
+        elementDossierId: frais.id,
+        montant: 10000,
+        typePaiement: 'FRAIS_INSCRIPTION',
+      })
+      .expect(201);
+    await api('admin')
+      .delete(
+        `/frais-scolarite/inscriptions/${id}/exceptions/${situation.fraisInscription[0].exception.id}`,
+      )
+      .expect(400);
+
+    // Une bourse changée après l'inscription s'applique aussi tout de suite.
+    const types = (await api('admin').get('/types-bourse').expect(200)).body;
+    const typeDe = (nom: string) =>
+      types.find((item: Body) => item.nom === nom).id;
+    const demande = await api('admin')
+      .post('/demandes-bourse', {
+        nouvellePersonne: { nom: 'Change', prenom: 'Bou' },
+        niveauDemande: 'PREMIERE_ANNEE',
+        filiereSouhaitee: 'Informatique',
+      })
+      .expect(201);
+    await api('admin')
+      .patch(`/demandes-bourse/${demande.body.id}/decision`, {
+        statut: 'ACCEPTEE',
+        typeBourseId: typeDe('Excellence fixe'),
+      })
+      .expect(200);
+    const boursier = (
+      await api('admin')
+        .post('/inscriptions', {
+          viaBourse: true,
+          demandeBourseId: demande.body.id,
+          anneeScolaire: anneeScolarite,
+          niveau: 'L1',
+          filiere: 'Informatique',
+        })
+        .expect(201)
+    ).body.id as string;
+    expect((await plan(boursier)).mensualites).toHaveLength(2);
+    await api('admin')
+      .patch(`/demandes-bourse/${demande.body.id}/decision`, {
+        statut: 'ACCEPTEE',
+        typeBourseId: typeDe('Excellence reduite'),
+      })
+      .expect(200);
+    situation = await plan(boursier);
+    expect(situation.regime).toBe('Bourse Excellence reduite');
+    expect(situation.mensualites.map((ligne: Body) => ligne.montant)).toEqual([
+      18000, 18000, 18000, 18000,
+    ]);
+
+    await api('finances')
+      .post(`/frais-scolarite/inscriptions/${id}/exceptions`, {
+        mois: 'Janvier',
+        mode: 'EXONERATION',
+        motif: 'x',
+      })
+      .expect(403);
+    await tarifs(35000);
+  });
+
   it('donne en un appel le même solde que la fiche de chaque inscription', async () => {
     const soldes = await api('admin').get('/inscriptions/soldes').expect(200);
     expect(soldes.body.length).toBeGreaterThan(0);

@@ -391,6 +391,7 @@ model Inscription {
 
   // Échéancier de scolarité de l'étudiant, figé à sa création.
   lignesScolarite        LigneScolarite[]
+  exceptionsScolarite    ExceptionScolarite[]
   decisionsBourse        DecisionBourse[]
   // Réduction accordée à cet étudiant : remplace celle de sa bourse.
   reductionIndividuelle  Decimal?         @db.Decimal(5, 2)
@@ -439,6 +440,7 @@ model ElementDossier {
   elementSubstitutUtiliseId String?
   elementSubstitutUtilise   ElementRequis?       @relation("SubstitutUtiliseDansDossier", fields: [elementSubstitutUtiliseId], references: [id])
   paiements                 Paiement[]
+  exception                 ExceptionScolarite?
   // Dernière modification : sert à refuser une modification faite hors ligne sur
   // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
   modifieLe                 DateTime             @default(now()) @updatedAt
@@ -560,6 +562,27 @@ model LigneScolarite {
   @@unique([inscriptionId, fraisAnnexeId])
   @@index([inscriptionId, type])
   @@map("lignes_scolarite")
+}
+
+// Exception accordée à un étudiant sur un mois (désigné par son nom, pour
+// survivre aux recalculs) ou sur un frais d'inscription, avec motif et auteur.
+// montantInitial : le montant d'avant, pour pouvoir revenir en arrière.
+model ExceptionScolarite {
+  id               String          @id @default(uuid())
+  inscriptionId    String
+  inscription      Inscription     @relation(fields: [inscriptionId], references: [id], onDelete: Cascade)
+  mois             String?
+  elementDossierId String?         @unique
+  elementDossier   ElementDossier? @relation(fields: [elementDossierId], references: [id], onDelete: Cascade)
+  mode             String
+  valeur           Decimal?        @db.Decimal(10, 2)
+  montantInitial   Decimal         @db.Decimal(10, 2)
+  motif            String
+  parNom           String
+  le               DateTime        @default(now())
+
+  @@unique([inscriptionId, mois])
+  @@map("exceptions_scolarite")
 }
 
 // Décision prise après une moyenne insuffisante : bourse RETIREE ou MAINTENUE.
