@@ -376,13 +376,16 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     const classe = await api('scolarite').get(
       `/academique/classes/${ids.classe}`,
     );
-    expect(
-      classe.body.inscriptions.map((item: Body) => item.personne.matricule),
-    ).toEqual([
-      expect.stringMatching(/^\d{2}INFO000\d$/),
-      expect.stringMatching(/^\d{2}INFO000\d$/),
-      expect.stringMatching(/^\d{2}INFO000\d$/),
-    ]);
+    // Seul A a payé ses frais d'inscription : lui seul a un matricule.
+    const matricules = Object.fromEntries(
+      classe.body.inscriptions.map((item: Body) => [
+        item.id,
+        item.personne.matricule,
+      ]),
+    );
+    expect(matricules[ids.a]).toMatch(/^\d{2}INFO000\d$/);
+    expect(matricules[ids.b]).toBeNull();
+    expect(matricules[ids.c]).toBeNull();
     // Déjà en classe : une seconde affectation est refusée.
     await api('scolarite')
       .post(`/academique/classes/${ids.classe}/affectations`, {
@@ -2271,6 +2274,23 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
   it('édite les cartes d’étudiant et ne reconnaît que les siennes au contrôle', async () => {
     const editer = (inscriptionIds: string[], renouveler = false) =>
       api('scolarite').post('/cartes', { inscriptionIds, renouveler });
+    // B solde ses frais d'inscription : il reçoit son matricule, donc sa carte.
+    const financeB = await api('scolarite').get(
+      `/inscriptions/${ids.b}/finance`,
+    );
+    for (const obligation of financeB.body.obligations)
+      if (
+        obligation.categorie === 'FRAIS' &&
+        Number(obligation.resteAPayer) > 0
+      )
+        await api('scolarite')
+          .post('/paiements', {
+            inscriptionId: ids.b,
+            elementDossierId: obligation.id,
+            montant: obligation.resteAPayer,
+            typePaiement: 'FRAIS_INSCRIPTION',
+          })
+          .expect(201);
     const cartes = (await editer([ids.a, ids.b]).expect(201)).body as Body[];
     expect(cartes).toHaveLength(2);
     const carteA = cartes.find((item) => item.inscriptionId === ids.a)!;
@@ -3080,6 +3100,126 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       })
       .expect(403);
     await tarifs(35000);
+  });
+
+  it('donne le matricule au paiement des frais d’inscription et imprime la liste filtrée des inscrits', async () => {
+    const anneeScolarite = '2031-2032';
+    const inscrire = async (nom: string) =>
+      (
+        await api('admin')
+          .post('/inscriptions', {
+            nouvellePersonne: { nom, prenom: 'Liste' },
+            anneeScolaire: anneeScolarite,
+            niveau: 'L1',
+            filiere: 'Informatique',
+          })
+          .expect(201)
+      ).body.id as string;
+    const matricule = async (id: string) =>
+      (await api('admin').get(`/inscriptions/${id}`).expect(200)).body.personne
+        .matricule as string | null;
+    const liste = async (filtres: Record<string, string>) =>
+      (
+        (
+          await api('admin')
+            .get(`/inscriptions/liste?${new URLSearchParams(filtres)}`)
+            .expect(200)
+        ).body as Body[]
+      ).map((item) => item.id);
+    const fraisDe = async (id: string) =>
+      (
+        await api('admin').get(`/inscriptions/${id}/finance`).expect(200)
+      ).body.obligations.filter(
+        (item: Body) =>
+          item.categorie === 'FRAIS' && Number(item.montantAttendu) > 0,
+      );
+
+    // Inscrit sans avoir payé : pas de matricule.
+    const paye = await inscrire('Payeur');
+    expect(await matricule(paye)).toBeNull();
+    expect(
+      await liste({
+        anneeScolaire: anneeScolarite,
+        fraisInscription: 'NON_PAYES',
+      }),
+    ).toContain(paye);
+    expect(await liste({ matricule: 'SANS' })).toContain(paye);
+
+    // Un paiement partiel ne suffit pas ; le solde donne le matricule.
+    const [frais] = await fraisDe(paye);
+    await api('admin')
+      .post('/paiements', {
+        inscriptionId: paye,
+        elementDossierId: frais.id,
+        montant: 10000,
+        typePaiement: 'FRAIS_INSCRIPTION',
+      })
+      .expect(201);
+    expect(await matricule(paye)).toBeNull();
+    for (const reste of await fraisDe(paye))
+      if (Number(reste.resteAPayer) > 0)
+        await api('admin')
+          .post('/paiements', {
+            inscriptionId: paye,
+            elementDossierId: reste.id,
+            montant: reste.resteAPayer,
+            typePaiement: 'FRAIS_INSCRIPTION',
+          })
+          .expect(201);
+    expect(await matricule(paye)).toMatch(/^31INFO\d{4}$/);
+    expect(
+      await liste({ anneeScolaire: anneeScolarite, fraisInscription: 'PAYES' }),
+    ).toContain(paye);
+    expect(await liste({ matricule: 'AVEC' })).toContain(paye);
+
+    // Une exonération des frais compte comme payée.
+    const exonere = await inscrire('Exonere');
+    for (const element of await fraisDe(exonere))
+      await api('admin')
+        .post(`/frais-scolarite/inscriptions/${exonere}/exceptions`, {
+          elementDossierId: element.id,
+          mode: 'EXONERATION',
+          motif: 'Enfant du personnel',
+        })
+        .expect(201);
+    expect(await matricule(exonere)).toMatch(/^31INFO\d{4}$/);
+    expect(await matricule(exonere)).not.toBe(await matricule(paye));
+
+    // La liste par pôle suit le pôle de la filière.
+    const filieres = (await api('admin').get('/academique/filieres')).body;
+    const avant = filieres.find((item: Body) => item.id === ids.filiere).poleId;
+    const pole = await api('admin')
+      .post('/academique/poles', { nom: 'Pôle de la liste' })
+      .expect(201);
+    await api('admin')
+      .patch(`/academique/filieres/${ids.filiere}`, { poleId: pole.body.id })
+      .expect(200);
+    const duPole = await liste({ poleId: pole.body.id });
+    expect(duPole).toEqual(expect.arrayContaining([paye, exonere]));
+    expect(await liste({ poleId: 'aucun' })).not.toContain(paye);
+    const lignes = (
+      await api('admin')
+        .get(`/inscriptions/liste?poleId=${pole.body.id}`)
+        .expect(200)
+    ).body as Body[];
+    expect(lignes.find((item) => item.id === paye)).toMatchObject({
+      pole: 'Pôle de la liste',
+      fraisInscriptionPayes: true,
+      personne: { nom: 'Payeur' },
+    });
+    await api('admin')
+      .patch(`/academique/filieres/${ids.filiere}`, { poleId: avant ?? null })
+      .expect(200);
+
+    // Un abandon sort de la liste, sauf si on le demande.
+    await api('admin')
+      .patch(`/inscriptions/${exonere}`, { statut: 'ABANDONNEE' })
+      .expect(200);
+    expect(await liste({ anneeScolaire: anneeScolarite })).not.toContain(
+      exonere,
+    );
+    expect(await liste({ statut: 'ABANDONNEE' })).toContain(exonere);
+    await api('admin').get('/inscriptions/liste?statut=PERDU').expect(400);
   });
 
   it('donne en un appel le même solde que la fiche de chaque inscription', async () => {

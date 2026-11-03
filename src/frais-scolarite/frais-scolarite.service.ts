@@ -8,6 +8,7 @@ import type { Prisma } from '../../generated/prisma/client';
 import { niveauxConnus } from '../academique/niveaux';
 import { isUniqueConstraintViolation } from '../common/prisma-errors';
 import { verrouillerDossier } from '../paiements/encaissement';
+import { attribuerMatricules } from '../inscriptions/matricules';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   arrondir,
@@ -826,6 +827,7 @@ export class FraisScolariteService {
         );
       throw error;
     }
+    if (elementDossierId) await attribuerMatricules(this.prisma, [id]);
     return this.situation(id);
   }
 

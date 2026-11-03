@@ -16,6 +16,7 @@ import {
   parseNombre,
   texteRequis,
 } from '../common/saisie';
+import { attribuerMatricules } from '../inscriptions/matricules';
 import { PrismaService } from '../prisma/prisma.service';
 import { STRUCTURE_TYPE } from './structure-type';
 import {
@@ -905,7 +906,7 @@ export class StructureService {
       : [];
     if (!ids.length)
       throw new BadRequestException('Sélectionnez au moins un étudiant');
-    return this.prisma.$transaction(async (transaction) => {
+    const resultat = await this.prisma.$transaction(async (transaction) => {
       const classe = await this.classeOuverte(classeId, transaction);
       const inscriptions = await transaction.inscription.findMany({
         where: { id: { in: ids } },
@@ -945,25 +946,11 @@ export class StructureService {
           filiere: classe.filiere.nom,
         },
       });
-      // Premier passage en classe : l'étudiant reçoit son matricule définitif.
-      const debut = classe.anneeAcademique.libelle.slice(2, 4);
-      for (const inscription of inscriptions) {
-        if (inscription.personne.matricule) continue;
-        const cle = `ETU-${debut}`;
-        const sequence = await transaction.sequenceNumero.upsert({
-          where: { cle },
-          create: { cle, valeur: 1 },
-          update: { valeur: { increment: 1 } },
-        });
-        await transaction.personne.update({
-          where: { id: inscription.personneId },
-          data: {
-            matricule: `${debut}${classe.filiere.code}${String(sequence.valeur).padStart(4, '0')}`,
-          },
-        });
-      }
       return { affectes: ids.length };
     });
+    // La classe fixe la filière : un étudiant qui a déjà payé reçoit son matricule.
+    await attribuerMatricules(this.prisma, ids);
+    return resultat;
   }
 
   async retirer(classeId: string, inscriptionId: string) {

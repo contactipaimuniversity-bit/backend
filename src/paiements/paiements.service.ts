@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type { Prisma } from '../../generated/prisma/client';
+import { attribuerMatricules } from '../inscriptions/matricules';
 import { PrismaService } from '../prisma/prisma.service';
 import { parseDateOrder } from '../common/date-order';
 import type { SaisieLocale } from '../common/saisie-locale';
@@ -187,7 +188,7 @@ export class PaiementsService {
     }
 
     // Contrôle du reste à payer, numéro de reçu et enregistrement : un seul bloc.
-    return this.prisma.$transaction(async (transaction) => {
+    const paiement = await this.prisma.$transaction(async (transaction) => {
       await verrouillerDossier(
         transaction,
         dossier.id,
@@ -237,6 +238,9 @@ export class PaiementsService {
         include: { echeance: true, elementDossier: true },
       });
     });
+    if (paiement.inscriptionId)
+      await attribuerMatricules(this.prisma, [paiement.inscriptionId]);
+    return paiement;
   }
 
   private async ensureMoisWithinRemaining(
@@ -709,6 +713,8 @@ export class PaiementsService {
     });
     if (result.count !== 1)
       throw new ConflictException('Ce paiement a deja ete affecte');
+    if (payment.inscriptionId)
+      await attribuerMatricules(this.prisma, [payment.inscriptionId]);
     return this.prisma.paiement.findUnique({
       where: { id: paymentId },
       include: {

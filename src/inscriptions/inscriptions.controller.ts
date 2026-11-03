@@ -42,6 +42,12 @@ export class InscriptionsController {
     return this.inscriptionsService.findAll(search);
   }
 
+  // Liste à imprimer, sans pagination, avec ses filtres (avant les routes :id).
+  @Get('liste')
+  liste(@Query() filtres: Record<string, string | undefined>) {
+    return this.inscriptionsService.liste(filtres);
+  }
+
   // Avant les routes :id : ce mot ne doit pas être lu comme un identifiant.
   @Get('soldes')
   soldes() {

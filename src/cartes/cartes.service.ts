@@ -95,7 +95,7 @@ export class CartesService {
     );
     if (sansMatricule.length)
       throw new ConflictException(
-        `Pas encore de matricule pour ${sansMatricule.map((item) => `${item.personne.prenom} ${item.personne.nom}`).join(', ')} : affectez d'abord l'étudiant à une classe`,
+        `Pas encore de matricule pour ${sansMatricule.map((item) => `${item.personne.prenom} ${item.personne.nom}`).join(', ')} : le matricule est attribué dès que les frais d'inscription sont payés`,
       );
     const abandons = inscriptions.filter(
       (item) => item.statut === 'ABANDONNEE',

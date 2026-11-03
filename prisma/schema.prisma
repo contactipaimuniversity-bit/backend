@@ -228,7 +228,7 @@ model Personne {
   demandesBourse DemandeBourse[]
   inscriptions   Inscription[]
 
-  // Numéro d'étudiant, attribué à la première affectation en classe.
+  // Numéro d'étudiant, attribué dès que les frais d'inscription sont payés.
   matricule String? @unique
   sexe      String?
 

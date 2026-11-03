@@ -8,6 +8,8 @@ import { $Enums } from '../../generated/prisma/client';
 import { normaliser } from '../academique/academique.rules';
 import { niveauxApplicables, niveauxConnus } from '../academique/niveaux';
 import { PrismaService } from '../prisma/prisma.service';
+import { listeInscrits } from './liste-inscrits';
+import { attribuerMatricules } from './matricules';
 import {
   nomUtilisateur,
   numeroRecu,
@@ -294,6 +296,8 @@ export class InscriptionsService {
   }
 
   async findAll(search: SearchInscriptionsDto) {
+    // Rattrape les étudiants qui ont payé sans encore avoir de matricule.
+    await attribuerMatricules(this.prisma);
     const page = this.parsePagination(search.page, 1);
     const limit = this.parsePagination(search.limit, 20, 100);
     const ordreDate = parseDateOrder(search.ordreDate);
@@ -412,7 +416,12 @@ export class InscriptionsService {
     return Math.min(parsed, maximum);
   }
 
+  liste(filtres: Record<string, string | undefined>) {
+    return listeInscrits(this.prisma, filtres);
+  }
+
   async findOne(id: string) {
+    await attribuerMatricules(this.prisma, [id]);
     const inscription = await this.prisma.inscription.findUnique({
       where: { id },
       include: this.detailInclude(),
