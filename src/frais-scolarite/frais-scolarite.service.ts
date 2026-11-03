@@ -96,7 +96,12 @@ export class FraisScolariteService {
         niveauxConnus(this.prisma),
         this.prisma.filiere.findMany({
           where: { actif: true },
-          select: { id: true, code: true, nom: true },
+          select: {
+            id: true,
+            code: true,
+            nom: true,
+            pole: { select: { nom: true, ordre: true } },
+          },
           orderBy: { nom: 'asc' },
         }),
         this.prisma.tarifScolarite.findMany(),

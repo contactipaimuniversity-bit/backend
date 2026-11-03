@@ -107,30 +107,24 @@ export function repartir<T extends LigneMois>(lignes: T[], verse: number) {
   });
 }
 
-// Nouveau plan d'un étudiant, comparé à ses lignes actuelles :
-// - un mois soldé ne change jamais ;
-// - un mois entamé prend le nouveau montant, sans descendre sous ce qui est versé ;
-// - un mois absent du nouveau plan disparaît, et ce qui était versé dessus
-//   solde les mois suivants ;
-// - après un retrait de bourse, les mois déjà échus restent tels quels.
+// Nouveau plan d'un étudiant, comparé à ses lignes actuelles. Chaque mois prend
+// le montant du paramétrage, même déjà payé : les versements ne sont pas liés à
+// un mois, ils soldent les mois du plus ancien au plus récent (repartir). Un
+// mois absent du plan disparaît. Seule exception : après un retrait de bourse,
+// les mois déjà échus gardent le prix de la bourse.
 export function fusionnerPlan<
   T extends LigneMois & { id: string; libelle: string },
->(
-  lignes: T[],
-  verse: number,
-  cible: LigneCible[],
-  aPartirDe: Date | null = null,
-) {
+>(lignes: T[], cible: LigneCible[], aPartirDe: Date | null = null) {
   const parLibelle = new Map(cible.map((ligne) => [ligne.libelle, ligne]));
   const pris = new Set<string>();
-  const conservees: Array<T & { paye: number; reste: number }> = [];
+  const conservees: T[] = [];
   const modifiees: Array<{
     id: string;
     montant: number;
     dateLimite: Date | null;
   }> = [];
   const supprimees: string[] = [];
-  for (const ligne of repartir(lignes, verse)) {
+  for (const ligne of [...lignes].sort(ordreDesMois)) {
     const voulue = parLibelle.get(ligne.libelle);
     const echue =
       aPartirDe !== null &&
@@ -141,11 +135,11 @@ export function fusionnerPlan<
       continue;
     }
     pris.add(ligne.libelle);
-    if (echue || !voulue || (ligne.paye > 0 && ligne.reste === 0)) {
+    if (echue || !voulue) {
       conservees.push(ligne);
       continue;
     }
-    const montant = arrondir(Math.max(voulue.montant, ligne.paye));
+    const montant = arrondir(voulue.montant);
     const memeDate =
       (ligne.dateLimite?.getTime() ?? null) ===
       (voulue.dateLimite?.getTime() ?? null);

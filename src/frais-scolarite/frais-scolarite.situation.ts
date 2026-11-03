@@ -180,18 +180,6 @@ async function changementsDe(client: Client, ids?: string[]) {
     orderBy: { ordre: 'asc' },
   });
   const tarifs = await client.tarifScolarite.findMany();
-  const verses = await client.paiement.groupBy({
-    by: ['inscriptionId'],
-    where: {
-      typePaiement: 'MENSUALITE',
-      annulation: { is: null },
-      ...(ids ? { inscriptionId: { in: ids } } : {}),
-    },
-    _sum: { montant: true },
-  });
-  const verseDe = new Map(
-    verses.map((item) => [item.inscriptionId, Number(item._sum.montant ?? 0)]),
-  );
   return inscriptions.flatMap((inscription) => {
     const cible = cibleDe(inscription, mois, tarifs);
     if (!cible.length) return [];
@@ -200,7 +188,6 @@ async function changementsDe(client: Client, ids?: string[]) {
         ...ligne,
         montant: Number(ligne.montant),
       })),
-      verseDe.get(inscription.id) ?? 0,
       cible,
       inscription.bourseRetireeLe,
     );

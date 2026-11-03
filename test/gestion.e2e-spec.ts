@@ -2853,18 +2853,20 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       })
       .expect(201);
 
-    // Nouveau tarif : appliqué dès l'enregistrement, sauf au mois déjà soldé.
+    // Nouveau tarif : appliqué dès l'enregistrement, à tous les mois ; le versé
+    // solde à nouveau les mois du plus ancien au plus récent.
     await tarifs(40000);
     expect(await enBase(id)).toEqual([
-      ['Octobre', 35000],
+      ['Octobre', 40000],
       ['Novembre', 40000],
       ['Décembre', 40000],
       ['Janvier', 40000],
     ]);
     let situation = await plan(id);
+    expect(situation.mensualites[0]).toMatchObject({ paye: 40000, reste: 0 });
     expect(situation.mensualites[1]).toMatchObject({
-      paye: 10000,
-      reste: 30000,
+      paye: 5000,
+      reste: 35000,
     });
 
     // Un mois ajouté au calendrier arrive aussitôt sur l'échéancier.
@@ -2931,7 +2933,7 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     await exception({
       mois: 'Novembre',
       mode: 'MONTANT',
-      valeur: 5000,
+      valeur: 4000,
       motif: 'x',
     }).expect(400);
     await exception({
@@ -2952,7 +2954,7 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     // L'exception survit à un changement de tarif.
     await tarifs(36000);
     expect(await enBase(id)).toEqual([
-      ['Octobre', 35000],
+      ['Octobre', 36000],
       ['Novembre', 36000],
       ['Décembre', 18000],
       ['Janvier', 0],

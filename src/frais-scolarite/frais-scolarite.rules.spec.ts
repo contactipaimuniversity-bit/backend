@@ -127,77 +127,76 @@ describe('repartir', () => {
 
 describe('fusionnerPlan', () => {
   const lignes = [
-    ligne('Octobre', '2026-10-05', 1, 15000),
-    ligne('Novembre', '2026-11-05', 2, 15000),
-    ligne('Décembre', '2026-12-05', 3, 15000),
+    ligne('Octobre', '2026-10-05', 1, 30000),
+    ligne('Novembre', '2026-11-05', 2, 30000),
+    ligne('Décembre', '2026-12-05', 3, 30000),
   ];
-  const cible = mois.map((item) => ({ ...item, montant: 30000 }));
+  const cible = mois.map((item) => ({ ...item, montant: 35000 }));
 
-  it('never changes a settled month, and raises the one paid in part', () => {
-    const plan = fusionnerPlan(lignes, 20000, cible);
-    expect(plan.conservees.map((item) => item.libelle)).toEqual(['Octobre']);
-    expect(plan.modifiees).toEqual([
-      { id: 'Novembre', montant: 30000, dateLimite: date('2026-11-05') },
-      { id: 'Décembre', montant: 30000, dateLimite: date('2026-12-05') },
+  it('puts every month at the price of the settings, even one already paid', () => {
+    const plan = fusionnerPlan(lignes, cible);
+    expect(plan.modifiees.map((item) => [item.id, item.montant])).toEqual([
+      ['Octobre', 35000],
+      ['Novembre', 35000],
+      ['Décembre', 35000],
     ]);
-    expect(plan.nouvelles).toEqual([]);
-    expect(plan.supprimees).toEqual([]);
   });
 
-  it('never lowers a month below what was already paid on it', () => {
-    const plan = fusionnerPlan(
-      lignes,
-      25000,
-      cible.map((item) => ({ ...item, montant: 8000 })),
+  it('settles the first month with a 35 000 payment once the price is right', () => {
+    // Cas réel : échéancier resté à 30 000, l'étudiant verse 35 000.
+    const avant = repartir(lignes, 35000);
+    expect(avant.map((item) => item.paye)).toEqual([30000, 5000, 0]);
+    const plan = fusionnerPlan(lignes, cible);
+    const apres = repartir(
+      lignes.map((item) => ({
+        ...item,
+        montant:
+          plan.modifiees.find((modif) => modif.id === item.id)?.montant ??
+          item.montant,
+      })),
+      35000,
     );
-    expect(plan.conservees.map((item) => item.libelle)).toEqual(['Octobre']);
-    expect(plan.modifiees[0]).toEqual({
-      id: 'Novembre',
-      montant: 10000,
-      dateLimite: date('2026-11-05'),
-    });
+    expect(apres.map((item) => [item.paye, item.reste])).toEqual([
+      [35000, 0],
+      [0, 35000],
+      [0, 35000],
+    ]);
   });
 
   it('writes nothing when the plan already matches the settings', () => {
-    const plan = fusionnerPlan(
-      lignes,
-      20000,
-      mois.map((item) => ({ ...item, montant: 15000 })),
-    );
-    expect(plan.change).toBe(false);
+    expect(
+      fusionnerPlan(
+        lignes,
+        mois.map((item) => ({ ...item, montant: 30000 })),
+      ).change,
+    ).toBe(false);
   });
 
   it('follows a new calendar: removed months go, new ones come, dates move', () => {
-    const plan = fusionnerPlan(lignes, 0, [
-      { libelle: 'Novembre', dateLimite: date('2026-11-10'), montant: 15000 },
-      { libelle: 'Janvier', dateLimite: date('2027-01-05'), montant: 15000 },
+    const plan = fusionnerPlan(lignes, [
+      { libelle: 'Novembre', dateLimite: date('2026-11-10'), montant: 30000 },
+      { libelle: 'Janvier', dateLimite: date('2027-01-05'), montant: 30000 },
     ]);
     expect(plan.supprimees).toEqual(['Octobre', 'Décembre']);
     expect(plan.modifiees).toEqual([
-      { id: 'Novembre', montant: 15000, dateLimite: date('2026-11-10') },
+      { id: 'Novembre', montant: 30000, dateLimite: date('2026-11-10') },
     ]);
     expect(plan.nouvelles.map((item) => item.libelle)).toEqual(['Janvier']);
   });
 
-  it('drops a paid month that the new plan no longer has: the money moves on', () => {
-    const plan = fusionnerPlan(lignes, 15000, [
-      { libelle: 'Tranche 1', dateLimite: date('2026-10-15'), montant: 50000 },
-    ]);
-    expect(plan.supprimees).toEqual(['Octobre', 'Novembre', 'Décembre']);
-    expect(plan.nouvelles.map((item) => item.libelle)).toEqual(['Tranche 1']);
-  });
-
   it('keeps the months already due when a scholarship is withdrawn', () => {
-    const plan = fusionnerPlan(lignes, 0, cible, date('2026-11-20'));
-    expect(plan.conservees.map((item) => item.montant)).toEqual([15000, 15000]);
+    const plan = fusionnerPlan(lignes, cible, date('2026-11-20'));
+    expect(plan.conservees.map((item) => item.libelle)).toEqual([
+      'Octobre',
+      'Novembre',
+    ]);
     expect(plan.modifiees.map((item) => item.id)).toEqual(['Décembre']);
   });
 
   it('removes a duplicated month', () => {
     const plan = fusionnerPlan(
-      [...lignes, { ...ligne('Octobre', '2026-10-05', 4, 15000), id: 'bis' }],
-      0,
-      mois.map((item) => ({ ...item, montant: 15000 })),
+      [...lignes, { ...ligne('Octobre', '2026-10-05', 4, 30000), id: 'bis' }],
+      mois.map((item) => ({ ...item, montant: 30000 })),
     );
     expect(plan.supprimees).toEqual(['bis']);
   });
