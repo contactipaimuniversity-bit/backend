@@ -1923,6 +1923,230 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     ).toBe(filiereA);
   });
 
+  it('répartit un tronc commun dans les filières en gardant le semestre déjà délibéré', async () => {
+    const pole = await api('admin')
+      .post('/academique/poles', { nom: 'Pôle à répartir' })
+      .expect(201);
+    const filiere = async (code: string, nom: string, extra: Body = {}) =>
+      (
+        await api('admin')
+          .post('/academique/filieres', {
+            code,
+            nom,
+            poleId: pole.body.id,
+            ...extra,
+          })
+          .expect(201)
+      ).body.id as string;
+    const filiereA = await filiere('REPA', 'Filière répartie A');
+    await filiere('REPB', 'Filière répartie B');
+    const tronc = await filiere('TC-REP', 'Tronc commun réparti', {
+      troncCommun: true,
+    });
+    const maquette = async (
+      filiereId: string,
+      semestre: number,
+      code: string,
+      matiere: string,
+    ) => {
+      const ue = await api('admin')
+        .post('/academique/unites', {
+          filiereId,
+          niveau: 'L1',
+          semestre,
+          code,
+          nom: `Unité ${code}`,
+          credits: 30,
+        })
+        .expect(201);
+      await api('admin')
+        .post('/academique/matieres', {
+          ueId: ue.body.id,
+          code: matiere,
+          nom: `Matière ${matiere}`,
+          coefficient: 1,
+          volumeHoraire: 30,
+        })
+        .expect(201);
+    };
+    // Le tronc commun porte le semestre 1 ; la filière A, le semestre 2.
+    await maquette(tronc, 1, 'RU1', 'RM1');
+    await maquette(filiereA, 2, 'RU2', 'RM2');
+    const classeTronc = (
+      await api('admin')
+        .post('/academique/classes', {
+          anneeAcademiqueId: ids.annee,
+          filiereId: tronc,
+          niveau: 'L1',
+        })
+        .expect(201)
+    ).body.id as string;
+    const inscrire = async (nom: string, nomFiliere: string) =>
+      (
+        await api('admin')
+          .post('/inscriptions', {
+            nouvellePersonne: { nom, prenom: 'Reparti' },
+            anneeScolaire: libelleAnnee,
+            niveau: 'L1',
+            filiere: nomFiliere,
+          })
+          .expect(201)
+      ).body as Body;
+    const etudiantA = await inscrire('Reparti-A', 'Filière répartie A');
+    const etudiantB = await inscrire('Reparti-B', 'Filière répartie B');
+    await api('admin')
+      .post(`/academique/classes/${classeTronc}/affectations`, {
+        inscriptionIds: [etudiantA.id, etudiantB.id],
+      })
+      .expect(201);
+
+    // Notes du semestre 1, dans le tronc commun.
+    const noter = async (classeId: string, code: string, notes: Body[]) => {
+      const coursId = (
+        (
+          await api('admin')
+            .get(`/academique/cours?classeId=${classeId}`)
+            .expect(200)
+        ).body as Body[]
+      ).find((item) => item.matiere.code === code)!.id;
+      const evaluation = await api('admin')
+        .post('/notes/evaluations', {
+          coursId,
+          type: 'EXAMEN',
+          libelle: `Examen ${code}`,
+        })
+        .expect(201);
+      await api('admin')
+        .put(`/notes/evaluations/${evaluation.body.id}/notes`, { notes })
+        .expect(200);
+      await api('admin')
+        .post(`/notes/evaluations/${evaluation.body.id}/valider`)
+        .expect(201);
+    };
+    await noter(classeTronc, 'RM1', [
+      { inscriptionId: etudiantA.id, valeur: 14 },
+      { inscriptionId: etudiantB.id, valeur: 9 },
+    ]);
+
+    // Pas de départ tant que le semestre noté n'est pas délibéré.
+    let repartition = (
+      await api('admin')
+        .get(`/academique/classes/${classeTronc}/repartition`)
+        .expect(200)
+    ).body;
+    const ligneA = () =>
+      repartition.etudiants.find(
+        (item: Body) => item.inscriptionId === etudiantA.id,
+      );
+    expect(ligneA().bloque).toMatch(/Semestre 1/);
+    await api('admin')
+      .post(`/academique/classes/${classeTronc}/repartition`, {
+        inscriptionIds: [etudiantA.id],
+      })
+      .expect(201)
+      .expect((reponse) => expect(reponse.body.deplaces).toBe(0));
+    await api('admin')
+      .post(`/deliberations/classes/${classeTronc}/semestres/1/cloturer`, {
+        president: 'Jury du tronc commun',
+      })
+      .expect(201);
+
+    // Chacun vers la classe de sa filière, créée au besoin ; B reste.
+    repartition = (
+      await api('admin')
+        .get(`/academique/classes/${classeTronc}/repartition`)
+        .expect(200)
+    ).body;
+    expect(ligneA()).toMatchObject({
+      filiere: 'Filière répartie A',
+      bloque: null,
+      destination: { nom: 'REPA L1', creee: true },
+    });
+    const reparti = await api('admin')
+      .post(`/academique/classes/${classeTronc}/repartition`, {
+        inscriptionIds: [etudiantA.id],
+      })
+      .expect(201);
+    expect(reparti.body).toMatchObject({ deplaces: 1, ignores: [] });
+    const apres = (await api('admin').get(`/inscriptions/${etudiantA.id}`))
+      .body;
+    expect(apres.filiereId).toBe(filiereA);
+    expect(apres.classeId).not.toBe(classeTronc);
+    const classeA = apres.classeId as string;
+
+    // Le parcours retrace les deux classes, avec le motif du changement.
+    const parcours = (
+      await api('admin')
+        .get(`/deliberations/etudiants/${apres.personneId}/parcours`)
+        .expect(200)
+    ).body;
+    const annee = parcours.annees.find(
+      (item: Body) => item.inscriptionId === etudiantA.id,
+    );
+    expect(annee.historique.map((item: Body) => item.classe.nom)).toEqual([
+      'TC-REP L1',
+      'REPA L1',
+    ]);
+    expect(annee.historique[0].au).toBeTruthy();
+    expect(annee.historique[1]).toMatchObject({
+      au: null,
+      motif: 'Fin du tronc commun TC-REP L1',
+    });
+    // Seules sa filière et le tronc commun de son pôle lui sont proposés.
+    const possibles = (
+      await api('admin')
+        .get(`/academique/inscriptions/${etudiantA.id}/classes-possibles`)
+        .expect(200)
+    ).body;
+    expect(possibles.classes.map((item: Body) => item.nom)).toEqual([
+      'TC-REP L1',
+    ]);
+    await api('admin')
+      .post(`/academique/inscriptions/${etudiantA.id}/changer-classe`, {
+        classeId: ids.classe,
+      })
+      .expect(400);
+
+    // Semestre 2 dans la classe de sa filière.
+    await noter(classeA, 'RM2', [{ inscriptionId: etudiantA.id, valeur: 12 }]);
+    await api('admin')
+      .post(`/deliberations/classes/${classeA}/semestres/2/cloturer`, {
+        president: 'Jury de la filière',
+      })
+      .expect(201);
+    // Son bulletin du semestre 1 est retrouvé dans le tronc commun (ici retenu
+    // pour scolarité non soldée : la recherche a donc abouti).
+    const bulletin = await api('admin')
+      .get(`/deliberations/bulletins/${etudiantA.id}/1`)
+      .expect(403);
+    expect(bulletin.body.message).toMatch(/scolarit/i);
+    const suivi = (
+      await api('admin')
+        .get(`/deliberations/etudiants/${apres.personneId}/parcours`)
+        .expect(200)
+    ).body.annees.find((item: Body) => item.inscriptionId === etudiantA.id);
+    expect(suivi.semestres.map((item: Body) => item.semestre)).toEqual([1, 2]);
+    // L'année réunit le semestre 1 (tronc commun) et le semestre 2 (filière).
+    const annuel = await api('admin')
+      .post(`/deliberations/classes/${classeA}/semestres/0/cloturer`, {
+        president: 'Jury de la filière',
+      })
+      .expect(201);
+    const resultatA = annuel.body.resultats.find(
+      (item: Body) => item.inscriptionId === etudiantA.id,
+    );
+    expect(
+      resultatA.detail.semestres.map((item: Body) => item.semestre),
+    ).toEqual([1, 2]);
+    expect(resultatA.creditsTotal).toBe(60);
+    // B est resté au tronc commun : son année s'y délibère.
+    await api('admin')
+      .post(`/deliberations/classes/${classeTronc}/semestres/0/cloturer`, {
+        president: 'Jury du tronc commun',
+      })
+      .expect(201);
+  });
+
   it('reçoit les lycéens par le formulaire public, sans rien exposer', async () => {
     const serveur = app.getHttpServer();
     const options = await request(serveur)

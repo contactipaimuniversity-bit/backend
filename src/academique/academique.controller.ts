@@ -165,6 +165,36 @@ export class AcademiqueController {
     return this.structure.candidats(id);
   }
 
+  // Fin d'un tronc commun : chacun part dans la classe de sa filière.
+  @Get('classes/:id/repartition')
+  repartition(@Param('id') id: string) {
+    return this.structure.repartition(id);
+  }
+
+  @Post('classes/:id/repartition')
+  repartir(
+    @Param('id') id: string,
+    @Body() body: Body,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.structure.repartir(id, body, acteurDe(request));
+  }
+
+  // Changer un étudiant de classe (même filière, ou tronc commun de son pôle).
+  @Get('inscriptions/:id/classes-possibles')
+  classesPossibles(@Param('id') id: string) {
+    return this.structure.classesPossibles(id);
+  }
+
+  @Post('inscriptions/:id/changer-classe')
+  changerClasse(
+    @Param('id') id: string,
+    @Body() body: Body,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.structure.changerClasse(id, body, acteurDe(request));
+  }
+
   @Post('classes/:id/affectations')
   affecter(@Param('id') id: string, @Body() body: Body) {
     return this.structure.affecter(id, body);

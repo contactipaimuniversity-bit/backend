@@ -101,6 +101,28 @@ export class DeliberationsService {
     });
   }
 
+  // Résultats de semestre clôturés de ces étudiants dans une autre classe de la
+  // même année : un étudiant qui a changé de classe (fin d'un tronc commun) les y
+  // a gardés, et ils comptent là où il est maintenant.
+  private async semestresAilleurs(
+    classe: { id: string; anneeAcademiqueId: string },
+    inscriptionIds: string[],
+  ) {
+    if (!inscriptionIds.length) return [];
+    return this.prisma.resultatDeliberation.findMany({
+      where: {
+        inscriptionId: { in: inscriptionIds },
+        deliberation: {
+          semestre: { in: [1, 2] },
+          statut: 'CLOTUREE',
+          classeId: { not: classe.id },
+          classe: { anneeAcademiqueId: classe.anneeAcademiqueId },
+        },
+      },
+      include: { deliberation: { select: { semestre: true } } },
+    });
+  }
+
   // Semestres qui portent réellement des matières dans la maquette de la classe.
   private async semestresActifs(classeId: string): Promise<number[]> {
     await this.structure.synchroniserCours(classeId);
@@ -117,9 +139,14 @@ export class DeliberationsService {
     await this.structure.synchroniserCours(classeId);
     const classe = await this.prisma.classe.findUniqueOrThrow({
       where: { id: classeId },
-      select: { id: true, filiereId: true, niveau: true },
+      select: {
+        id: true,
+        filiereId: true,
+        niveau: true,
+        anneeAcademiqueId: true,
+      },
     });
-    const [regles, etudiants, acquises, cours] = await Promise.all([
+    const [regles, membres, acquises, cours] = await Promise.all([
       this.structure.regles(),
       this.etudiants(classeId),
       this.structure.unitesAcquises(classe),
@@ -136,6 +163,18 @@ export class DeliberationsService {
         ],
       }),
     ]);
+    // Arrivés en cours d'année, déjà délibérés pour ce semestre dans leur ancienne classe.
+    const ailleurs = new Set(
+      (
+        await this.semestresAilleurs(
+          classe,
+          membres.map((item) => item.id),
+        )
+      )
+        .filter((item) => item.deliberation.semestre === semestre)
+        .map((item) => item.inscriptionId),
+    );
+    const etudiants = membres.filter((item) => !ailleurs.has(item.id));
     const problemes: string[] = [];
     if (!cours.length)
       problemes.push(
@@ -241,6 +280,10 @@ export class DeliberationsService {
   }
 
   private async calculAnnuel(classeId: string, dernierNiveau: boolean) {
+    const classe = await this.prisma.classe.findUniqueOrThrow({
+      where: { id: classeId },
+      select: { id: true, anneeAcademiqueId: true },
+    });
     const [regles, etudiants, actifs, deliberations] = await Promise.all([
       this.structure.regles(),
       this.etudiants(classeId),
@@ -250,22 +293,46 @@ export class DeliberationsService {
         include: { resultats: true },
       }),
     ]);
+    const ailleurs = await this.semestresAilleurs(
+      classe,
+      etudiants.map((item) => item.id),
+    );
+    const resultatDe = (inscriptionId: string, semestre: number) =>
+      deliberations
+        .find((item) => item.semestre === semestre)
+        ?.resultats.find((item) => item.inscriptionId === inscriptionId) ??
+      ailleurs.find(
+        (item) =>
+          item.inscriptionId === inscriptionId &&
+          item.deliberation.semestre === semestre,
+      );
+    // Les semestres de la maquette, plus ceux suivis dans une classe quittée
+    // (le semestre 1 d'un tronc commun quand la filière n'a que le semestre 2).
+    const semestresAnnee = [
+      ...new Set([
+        ...actifs,
+        ...ailleurs.map((item) => item.deliberation.semestre),
+      ]),
+    ].sort();
     const problemes: string[] = [];
     if (!actifs.length)
       problemes.push('Aucune matière dans la maquette de cette classe');
-    for (const semestre of actifs)
-      if (!deliberations.some((item) => item.semestre === semestre))
+    // Un semestre manque s'il n'est délibéré ni ici ni, pour un étudiant
+    // arrivé en cours d'année, dans son ancienne classe.
+    for (const semestre of semestresAnnee)
+      if (
+        !deliberations.some((item) => item.semestre === semestre) &&
+        etudiants.some((item) => !resultatDe(item.id, semestre))
+      )
         problemes.push(
           `La délibération du semestre ${semestre} n'est pas clôturée`,
         );
     const lignes = etudiants.map((inscription) => {
-      const semestres = actifs.map((semestre) => {
+      const semestres = semestresAnnee.map((semestre) => {
         const deliberation = deliberations.find(
           (item) => item.semestre === semestre,
         );
-        const resultat = deliberation?.resultats.find(
-          (item) => item.inscriptionId === inscription.id,
-        );
+        const resultat = resultatDe(inscription.id, semestre);
         // Étudiant absent d'une délibération : aucun crédit pour ce semestre.
         const creditsTotal =
           resultat?.creditsTotal ??
@@ -520,17 +587,40 @@ export class DeliberationsService {
       },
       include: { resultats: true },
     });
+    const ailleurs = await this.semestresAilleurs(
+      {
+        id: classe.id,
+        anneeAcademiqueId: (
+          await this.prisma.classe.findUniqueOrThrow({
+            where: { id: classe.id },
+            select: { anneeAcademiqueId: true },
+          })
+        ).anneeAcademiqueId,
+      },
+      lignes.map((ligne) => ligne.inscriptionId),
+    );
     const credits: Array<
       Omit<Prisma.CreditUECreateManyInput, 'deliberationId'>
     > = [];
     for (const ligne of lignes) {
       const anneeAcquise =
         ligne.creditsTotal > 0 && ligne.creditsAcquis === ligne.creditsTotal;
-      for (const deliberation of semestres) {
-        const resultat = deliberation.resultats.find(
-          (item) => item.inscriptionId === ligne.inscriptionId,
-        );
-        if (!resultat) continue;
+      // Chaque semestre, là où l'étudiant a été délibéré (ici, ou dans la classe quittée).
+      const sources = [1, 2].flatMap((numero) => {
+        const resultat =
+          semestres
+            .find((item) => item.semestre === numero)
+            ?.resultats.find(
+              (item) => item.inscriptionId === ligne.inscriptionId,
+            ) ??
+          ailleurs.find(
+            (item) =>
+              item.inscriptionId === ligne.inscriptionId &&
+              item.deliberation.semestre === numero,
+          );
+        return resultat ? [{ semestre: numero, resultat }] : [];
+      });
+      for (const { semestre: numeroSemestre, resultat } of sources) {
         const semestreAcquis = resultat.creditsAcquis === resultat.creditsTotal;
         const unites =
           (resultat.detail as { unites?: UniteDetail[] }).unites ?? [];
@@ -544,7 +634,7 @@ export class DeliberationsService {
             filiereId: filiereDe?.get(ligne.inscriptionId) ?? classe.filiereId,
             niveau: classe.niveau,
             annee: classe.anneeAcademique.libelle,
-            semestre: deliberation.semestre,
+            semestre: numeroSemestre,
             code: unite.code,
             nom: unite.nom,
             credits: unite.credits,
@@ -676,12 +766,34 @@ export class DeliberationsService {
     });
     if (!inscription?.classe)
       throw new NotFoundException("Cet étudiant n'est affecté à aucune classe");
-    const deliberation = await this.prisma.deliberation.findUnique({
+    // Sa classe actuelle, ou celle qu'il a quittée en cours d'année et où ce
+    // semestre a été délibéré (fin d'un tronc commun).
+    const ici = await this.prisma.deliberation.findUnique({
       where: {
         classeId_semestre: { classeId: inscription.classe.id, semestre },
       },
-      include: { resultats: true },
+      include: {
+        resultats: true,
+        classe: { include: { filiere: true, anneeAcademique: true } },
+      },
     });
+    const deliberation =
+      (ici?.resultats.some((item) => item.inscriptionId === inscriptionId)
+        ? ici
+        : null) ??
+      (await this.prisma.deliberation.findFirst({
+        where: {
+          semestre,
+          statut: 'CLOTUREE',
+          resultats: { some: { inscriptionId } },
+          classe: { anneeAcademiqueId: inscription.classe.anneeAcademiqueId },
+        },
+        include: {
+          resultats: true,
+          classe: { include: { filiere: true, anneeAcademique: true } },
+        },
+      })) ??
+      ici;
     if (deliberation?.statut !== 'CLOTUREE')
       throw new ConflictException(
         "Le bulletin n'est disponible qu'après clôture de la délibération",
@@ -710,10 +822,10 @@ export class DeliberationsService {
       etudiant: inscription.personne,
       inscriptionId,
       classe: {
-        nom: this.structure.nomClasse(inscription.classe),
-        niveau: inscription.classe.niveau,
-        filiere: inscription.classe.filiere.nom,
-        annee: inscription.classe.anneeAcademique.libelle,
+        nom: this.structure.nomClasse(deliberation.classe),
+        niveau: deliberation.classe.niveau,
+        filiere: deliberation.classe.filiere.nom,
+        annee: deliberation.classe.anneeAcademique.libelle,
       },
       semestre,
       resultat: {
@@ -1016,6 +1128,17 @@ export class DeliberationsService {
       );
     const retenue = await this.retenue(inscriptionId);
     if (retenue) throw new ForbiddenException(retenue);
+    // Semestres délibérés dans une classe quittée en cours d'année.
+    const semestresQuittes = await this.prisma.deliberation.findMany({
+      where: {
+        semestre: { in: [1, 2] },
+        statut: 'CLOTUREE',
+        classeId: { not: classe.id },
+        resultats: { some: { inscriptionId } },
+        classe: { anneeAcademiqueId: classe.anneeAcademiqueId },
+      },
+      include: { resultats: { where: { inscriptionId } } },
+    });
     const [credits, niveaux, finDeCycle] = await Promise.all([
       // Toutes les unités de l'étudiant dans la filière, tous niveaux confondus.
       this.prisma.creditUE.findMany({
@@ -1052,9 +1175,14 @@ export class DeliberationsService {
         filiere: classe.filiere.nom,
         annee: classe.anneeAcademique.libelle,
       },
-      semestres: deliberations
-        .filter((item) => item.semestre !== 0)
+      semestres: [1, 2]
+        .map(
+          (numero) =>
+            deliberations.find((item) => item.semestre === numero) ??
+            semestresQuittes.find((item) => item.semestre === numero),
+        )
         .flatMap((deliberation) => {
+          if (!deliberation) return [];
           const resultat = deliberation.resultats.find(
             (item) => item.inscriptionId === inscriptionId,
           );
@@ -1199,6 +1327,10 @@ export class DeliberationsService {
         where: { personneId },
         include: {
           classe: { include: { filiere: true, anneeAcademique: true } },
+          historiqueClasses: {
+            include: { classe: { include: { filiere: true } } },
+            orderBy: { du: 'asc' },
+          },
           resultats: {
             where: { deliberation: { statut: 'CLOTUREE' } },
             include: {
@@ -1233,11 +1365,24 @@ export class DeliberationsService {
           inscriptionId: inscription.id,
           annee: classe?.anneeAcademique.libelle ?? inscription.anneeScolaire,
           niveau: classe?.niveau ?? inscription.niveau,
-          filiere: classe?.filiere.nom ?? inscription.filiere,
+          // Sa propre filière (en tronc commun, ce n'est pas celle de la classe).
+          filiere: inscription.filiere,
           statut: inscription.statut,
           classe: classe
             ? { id: classe.id, nom: this.structure.nomClasse(classe) }
             : null,
+          // Les classes suivies cette année, dans l'ordre (tronc commun, puis filière).
+          historique: inscription.historiqueClasses.map((passage) => ({
+            classe: {
+              id: passage.classe.id,
+              nom: this.structure.nomClasse(passage.classe),
+              troncCommun: passage.classe.filiere.troncCommun,
+            },
+            du: passage.du,
+            au: passage.au,
+            motif: passage.motif,
+            parNom: passage.parNom,
+          })),
           semestres: inscription.resultats
             .filter((item) => item.deliberation.semestre !== 0)
             .sort((a, b) => a.deliberation.semestre - b.deliberation.semestre)

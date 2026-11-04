@@ -376,13 +376,15 @@ model Inscription {
   elementsDossier ElementDossier[]
   paiements       Paiement[]
 
-  classeId  String?
-  classe    Classe?                @relation(fields: [classeId], references: [id])
-  absences  AbsenceEtudiant[]
-  notes     Note[]
-  resultats ResultatDeliberation[]
-  credits   CreditUE[]
-  cartes    CarteEtudiant[]
+  classeId          String?
+  classe            Classe?                @relation(fields: [classeId], references: [id])
+  // Les classes suivies dans l'année, dans l'ordre (tronc commun puis filière…).
+  historiqueClasses HistoriqueClasse[]
+  absences          AbsenceEtudiant[]
+  notes             Note[]
+  resultats         ResultatDeliberation[]
+  credits           CreditUE[]
+  cartes            CarteEtudiant[]
 
   // Filière du référentiel. Le texte « filiere » reste ce qui a été saisi ;
   // ce lien fait foi dès qu'il existe (une faute de frappe ne casse plus rien).
@@ -394,9 +396,9 @@ model Inscription {
   exceptionsScolarite    ExceptionScolarite[]
   decisionsBourse        DecisionBourse[]
   // Réduction accordée à cet étudiant : remplace celle de sa bourse.
-  reductionIndividuelle  Decimal?         @db.Decimal(5, 2)
+  reductionIndividuelle  Decimal?             @db.Decimal(5, 2)
   // Échéancier retouché à la main : un recalcul général ne l'écrase pas.
-  echeancierPersonnalise Boolean          @default(false)
+  echeancierPersonnalise Boolean              @default(false)
   bourseRetireeLe        DateTime?
 
   // Dernière modification : sert à refuser une modification faite hors ligne sur
@@ -989,6 +991,24 @@ model Salle {
   @@map("salles")
 }
 
+// Passage d'un étudiant dans une classe : du … au … (vide tant qu'il y est),
+// avec le motif et l'auteur d'un changement. Le parcours le retrace.
+model HistoriqueClasse {
+  id            String      @id @default(uuid())
+  inscriptionId String
+  inscription   Inscription @relation(fields: [inscriptionId], references: [id], onDelete: Cascade)
+  classeId      String
+  classe        Classe      @relation(fields: [classeId], references: [id], onDelete: Cascade)
+  du            DateTime    @default(now())
+  au            DateTime?
+  motif         String?
+  parNom        String?
+
+  @@index([inscriptionId])
+  @@index([classeId])
+  @@map("historique_classes")
+}
+
 model Classe {
   id                String          @id @default(uuid())
   anneeAcademiqueId String
@@ -1002,6 +1022,7 @@ model Classe {
   inscriptions  Inscription[]
   cours         Cours[]
   deliberations Deliberation[]
+  historique    HistoriqueClasse[]
 
   @@unique([anneeAcademiqueId, filiereId, niveau, groupe])
   @@map("classes")
@@ -1065,15 +1086,15 @@ model Cours {
 
 // Emploi du temps hebdomadaire.
 model Creneau {
-  id         String  @id @default(uuid())
-  coursId    String
-  cours      Cours   @relation(fields: [coursId], references: [id], onDelete: Cascade)
+  id           String  @id @default(uuid())
+  coursId      String
+  cours        Cours   @relation(fields: [coursId], references: [id], onDelete: Cascade)
   // 1 = lundi … 6 = samedi
-  jour       Int
-  heureDebut String
-  heureFin   String
-  salleId    String?
-  salle      Salle?  @relation(fields: [salleId], references: [id])
+  jour         Int
+  heureDebut   String
+  heureFin     String
+  salleId      String?
+  salle        Salle?  @relation(fields: [salleId], references: [id])
   // Cours commun à plusieurs classes : leurs créneaux partagent cette clé
   // (un enseignant, une salle, une heure ; une seule séance payée).
   regroupement String?

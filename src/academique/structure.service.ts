@@ -994,6 +994,10 @@ export class StructureService {
               filiere: classe.filiere.nom,
             },
       });
+      // Début de son passage dans la classe, pour le parcours.
+      await transaction.historiqueClasse.createMany({
+        data: ids.map((inscriptionId) => ({ inscriptionId, classeId })),
+      });
       return { affectes: ids.length };
     });
     // La classe fixe la filière : un étudiant qui a déjà payé reçoit son matricule.
@@ -1020,11 +1024,334 @@ export class StructureService {
       throw new ConflictException(
         "Cet étudiant a déjà des notes ou des absences dans la classe : il ne peut plus en être retiré. Marquez son inscription « abandonnée » s'il a quitté l'établissement.",
       );
-    await this.prisma.inscription.update({
-      where: { id: inscriptionId },
-      data: { classeId: null },
-    });
+    // Un retrait corrige une erreur d'affectation : ce passage n'a pas eu lieu.
+    await this.prisma.$transaction([
+      this.prisma.historiqueClasse.deleteMany({
+        where: { inscriptionId, classeId, au: null },
+      }),
+      this.prisma.inscription.update({
+        where: { id: inscriptionId },
+        data: { classeId: null },
+      }),
+    ]);
     return { retire: true };
+  }
+
+  // ---------- Changement de classe ----------
+  // L'étudiant change de classe, jamais de filière : seules les classes de sa
+  // filière, ou le tronc commun de son pôle, de la même année et du même niveau,
+  // lui sont proposées. Ses notes et absences le suivent (elles tiennent à son
+  // inscription) ; le changement reste dans l'historique de son parcours.
+
+  private async etudiantAChanger(inscriptionId: string) {
+    const inscription = await this.prisma.inscription.findUnique({
+      where: { id: inscriptionId },
+      include: {
+        personne: true,
+        filiereRef: true,
+        classe: { include: { filiere: true, anneeAcademique: true } },
+      },
+    });
+    if (!inscription) throw new NotFoundException('Inscription introuvable');
+    if (inscription.statut === 'ABANDONNEE')
+      throw new ConflictException(
+        "L'inscription de cet étudiant est abandonnée",
+      );
+    return inscription;
+  }
+
+  // Les classes où l'étudiant peut aller, la plus naturelle en premier.
+  async classesPossibles(inscriptionId: string) {
+    const inscription = await this.etudiantAChanger(inscriptionId);
+    const classes = await this.prisma.classe.findMany({
+      where: {
+        id: inscription.classeId ? { not: inscription.classeId } : undefined,
+        niveau: inscription.niveau,
+        anneeAcademique: {
+          libelle: inscription.anneeScolaire,
+          statut: { not: 'CLOTUREE' },
+        },
+        OR: [
+          ...(inscription.filiereId
+            ? [{ filiereId: inscription.filiereId }]
+            : []),
+          ...(inscription.filiereRef?.poleId
+            ? [
+                {
+                  filiere: {
+                    troncCommun: true,
+                    poleId: inscription.filiereRef.poleId,
+                  },
+                },
+              ]
+            : []),
+        ],
+      },
+      include: {
+        filiere: true,
+        _count: { select: { inscriptions: true } },
+      },
+    });
+    return {
+      etudiant: {
+        inscriptionId: inscription.id,
+        nom: inscription.personne.nom,
+        prenom: inscription.personne.prenom,
+        filiere: inscription.filiereRef?.nom ?? inscription.filiere,
+        classe: inscription.classe
+          ? {
+              id: inscription.classe.id,
+              nom: this.nomClasse(inscription.classe),
+            }
+          : null,
+      },
+      classes: classes
+        .map((classe) => ({
+          id: classe.id,
+          nom: this.nomClasse(classe),
+          troncCommun: classe.filiere.troncCommun,
+          effectif: classe._count.inscriptions,
+          capacite: classe.capacite,
+        }))
+        .sort(
+          (first, second) =>
+            Number(first.troncCommun) - Number(second.troncCommun) ||
+            first.nom.localeCompare(second.nom, 'fr'),
+        ),
+    };
+  }
+
+  // Un semestre noté dans l'ancienne classe doit y être délibéré avant le départ :
+  // ses résultats y sont alors figés et comptent dans la nouvelle classe.
+  private async semestresNonDeliberes(inscriptionId: string, classeId: string) {
+    const notes = await this.prisma.note.findMany({
+      where: {
+        inscriptionId,
+        evaluation: { cours: { classeId } },
+      },
+      select: {
+        evaluation: {
+          select: {
+            cours: {
+              select: {
+                matiere: { select: { ue: { select: { semestre: true } } } },
+              },
+            },
+          },
+        },
+      },
+    });
+    const semestres = [
+      ...new Set(
+        notes.map((note) => note.evaluation.cours.matiere.ue.semestre),
+      ),
+    ];
+    if (!semestres.length) return [];
+    const closes = await this.prisma.deliberation.findMany({
+      where: { classeId, semestre: { in: semestres }, statut: 'CLOTUREE' },
+      select: { semestre: true },
+    });
+    return semestres
+      .filter((semestre) => !closes.some((item) => item.semestre === semestre))
+      .sort();
+  }
+
+  async changerClasse(inscriptionId: string, body: Body, acteur: Acteur) {
+    const inscription = await this.etudiantAChanger(inscriptionId);
+    const classeId = texteRequis(body.classeId, 'La nouvelle classe');
+    if (classeId === inscription.classeId)
+      throw new BadRequestException("L'étudiant est déjà dans cette classe");
+    const possibles = await this.classesPossibles(inscriptionId);
+    const cible = possibles.classes.find((item) => item.id === classeId);
+    if (!cible)
+      throw new BadRequestException(
+        "Cette classe n'est ni de sa filière ni le tronc commun de son pôle, pour son année et son niveau",
+      );
+    if (cible.capacite !== null && cible.effectif >= cible.capacite)
+      throw new ConflictException(
+        `${cible.nom} est complète (${cible.capacite} places)`,
+      );
+    if (inscription.classe) {
+      if (inscription.classe.anneeAcademique.statut === 'CLOTUREE')
+        throw new ConflictException('Cette année académique est clôturée');
+      const manquants = await this.semestresNonDeliberes(
+        inscriptionId,
+        inscription.classe.id,
+      );
+      if (manquants.length)
+        throw new ConflictException(
+          `${inscription.personne.prenom} ${inscription.personne.nom} a déjà des notes en ${this.nomClasse(inscription.classe)} : clôturez d'abord la délibération du semestre ${manquants.join(' et ')} de cette classe, ses résultats y seront gardés`,
+        );
+    }
+    const motif =
+      typeof body.motif === 'string' && body.motif.trim()
+        ? body.motif.trim().slice(0, 300)
+        : null;
+    const maintenant = new Date();
+    await this.prisma.$transaction(async (transaction) => {
+      await transaction.historiqueClasse.updateMany({
+        where: { inscriptionId, au: null },
+        data: { au: maintenant },
+      });
+      await transaction.historiqueClasse.create({
+        data: {
+          inscriptionId,
+          classeId,
+          du: maintenant,
+          motif,
+          parNom: acteur.nom,
+        },
+      });
+      // Seule la classe change : la filière, le tarif et le matricule restent.
+      await transaction.inscription.update({
+        where: { id: inscriptionId },
+        data: { classeId },
+      });
+    });
+    return { inscriptionId, classe: cible.nom };
+  }
+
+  // ---------- Répartition d'un tronc commun ----------
+  // Chaque étudiant du tronc commun part dans la classe de sa propre filière
+  // (créée si besoin, groupe A), même année, même niveau.
+
+  private async classeTroncCommun(classeId: string) {
+    const classe = await this.classeOuverte(classeId);
+    if (!classe.filiere.troncCommun)
+      throw new BadRequestException("Cette classe n'est pas un tronc commun");
+    return classe;
+  }
+
+  async repartition(classeId: string) {
+    const classe = await this.classeTroncCommun(classeId);
+    const [etudiants, classes] = await Promise.all([
+      this.prisma.inscription.findMany({
+        where: { classeId, statut: { not: 'ABANDONNEE' } },
+        include: { personne: true, filiereRef: true },
+        orderBy: [
+          { personne: { nom: 'asc' } },
+          { personne: { prenom: 'asc' } },
+        ],
+      }),
+      this.prisma.classe.findMany({
+        where: {
+          anneeAcademiqueId: classe.anneeAcademiqueId,
+          niveau: classe.niveau,
+          filiere: { troncCommun: false },
+        },
+        include: { filiere: true },
+        orderBy: { groupe: 'asc' },
+      }),
+    ]);
+    return {
+      classe: { id: classe.id, nom: this.nomClasse(classe) },
+      etudiants: await Promise.all(
+        etudiants.map(async (inscription) => {
+          const existante = classes.find(
+            (item) => item.filiereId === inscription.filiereId,
+          );
+          const manquants = await this.semestresNonDeliberes(
+            inscription.id,
+            classeId,
+          );
+          return {
+            inscriptionId: inscription.id,
+            personne: {
+              nom: inscription.personne.nom,
+              prenom: inscription.personne.prenom,
+              matricule: inscription.personne.matricule,
+            },
+            filiere: inscription.filiereRef?.nom ?? inscription.filiere,
+            destination: !inscription.filiereRef
+              ? null
+              : existante
+                ? {
+                    id: existante.id,
+                    nom: this.nomClasse(existante),
+                    creee: false,
+                  }
+                : {
+                    id: null,
+                    nom: `${inscription.filiereRef.code} ${classe.niveau}`,
+                    creee: true,
+                  },
+            bloque: !inscription.filiereRef
+              ? "Sa filière n'est pas rattachée à la structure académique"
+              : manquants.length
+                ? `Semestre ${manquants.join(' et ')} à délibérer d'abord dans ${this.nomClasse(classe)}`
+                : null,
+          };
+        }),
+      ),
+    };
+  }
+
+  async repartir(classeId: string, body: Body, acteur: Acteur) {
+    const { etudiants } = await this.repartition(classeId);
+    const choisis = new Set(
+      Array.isArray(body.inscriptionIds)
+        ? body.inscriptionIds.filter(
+            (id): id is string => typeof id === 'string',
+          )
+        : [],
+    );
+    if (!choisis.size)
+      throw new BadRequestException('Sélectionnez au moins un étudiant');
+    const classe = await this.classeTroncCommun(classeId);
+    const motif =
+      typeof body.motif === 'string' && body.motif.trim()
+        ? body.motif.trim()
+        : `Fin du tronc commun ${this.nomClasse(classe)}`;
+    const deplaces: string[] = [];
+    const ignores: Array<{ nom: string; raison: string }> = [];
+    for (const etudiant of etudiants) {
+      if (!choisis.has(etudiant.inscriptionId)) continue;
+      const nom = `${etudiant.personne.prenom} ${etudiant.personne.nom}`;
+      if (etudiant.bloque || !etudiant.destination) {
+        ignores.push({ nom, raison: etudiant.bloque ?? 'Sans destination' });
+        continue;
+      }
+      // La classe de sa filière, créée au premier étudiant qui y va.
+      let destinationId = etudiant.destination.id;
+      if (!destinationId) {
+        const inscription = await this.prisma.inscription.findUniqueOrThrow({
+          where: { id: etudiant.inscriptionId },
+          select: { filiereId: true },
+        });
+        const deja = await this.prisma.classe.findFirst({
+          where: {
+            anneeAcademiqueId: classe.anneeAcademiqueId,
+            filiereId: inscription.filiereId!,
+            niveau: classe.niveau,
+          },
+          orderBy: { groupe: 'asc' },
+        });
+        destinationId =
+          deja?.id ??
+          (
+            await this.createClasse({
+              anneeAcademiqueId: classe.anneeAcademiqueId,
+              filiereId: inscription.filiereId,
+              niveau: classe.niveau,
+              groupe: 'A',
+            })
+          ).id;
+      }
+      try {
+        await this.changerClasse(
+          etudiant.inscriptionId,
+          { classeId: destinationId, motif },
+          acteur,
+        );
+        deplaces.push(nom);
+      } catch (error) {
+        ignores.push({
+          nom,
+          raison: error instanceof Error ? error.message : 'Changement refusé',
+        });
+      }
+    }
+    return { deplaces: deplaces.length, ignores };
   }
 
   // ---------- Maquette ----------
