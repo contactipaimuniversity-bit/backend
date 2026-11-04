@@ -14,6 +14,7 @@ import {
   texteOptionnel,
   texteRequis,
 } from '../common/saisie';
+import { seancesUniques } from '../common/seances-uniques';
 import { PrismaService } from '../prisma/prisma.service';
 import { bornesDuMois, CAHIER_A_COMPLETER } from './rh.rules';
 import { RhService } from './rh.service';
@@ -388,7 +389,18 @@ export class PointageService {
     const prevus = new Set(
       creneaux.map((creneau) => cle(creneau.coursId, creneau.heureDebut)),
     );
-    const lignes = creneaux.map((creneau) => {
+    const vus = new Set<string>();
+    const lignes = creneaux.flatMap((creneau) => {
+      if (creneau.regroupement) {
+        if (vus.has(creneau.regroupement)) return [];
+        vus.add(creneau.regroupement);
+      }
+      const classes = creneau.regroupement
+        ? creneaux
+            .filter((item) => item.regroupement === creneau.regroupement)
+            .map((item) => nomClasse(item.cours.classe))
+            .sort((first, second) => first.localeCompare(second, 'fr'))
+        : [nomClasse(creneau.cours.classe)];
       const seance = seances.find(
         (item) =>
           item.coursId === creneau.coursId &&
@@ -399,30 +411,33 @@ export class PointageService {
           item.coursId === creneau.coursId &&
           item.heureDebut === creneau.heureDebut,
       );
-      return {
-        creneauId: creneau.id,
-        heureDebut: creneau.heureDebut,
-        heureFin: creneau.heureFin,
-        classe: nomClasse(creneau.cours.classe),
-        matiere: creneau.cours.matiere.nom,
-        salle: creneau.salle?.nom ?? null,
-        enseignant: seance?.enseignant ?? creneau.cours.enseignant,
-        etat: seance ? 'PRESENT' : absence ? 'ABSENT' : 'A_POINTER',
-        seance: seance
-          ? {
-              id: seance.id,
-              dureeMinutes: seance.dureeMinutes,
-              cahierRempli: seance.contenu !== CAHIER_A_COMPLETER,
-            }
-          : null,
-        absence: absence
-          ? {
-              id: absence.id,
-              justifiee: absence.justifiee,
-              motif: absence.motif,
-            }
-          : null,
-      };
+      return [
+        {
+          creneauId: creneau.id,
+          heureDebut: creneau.heureDebut,
+          heureFin: creneau.heureFin,
+          classe: classes.join(' · '),
+          commun: classes.length > 1,
+          matiere: creneau.cours.matiere.nom,
+          salle: creneau.salle?.nom ?? null,
+          enseignant: seance?.enseignant ?? creneau.cours.enseignant,
+          etat: seance ? 'PRESENT' : absence ? 'ABSENT' : 'A_POINTER',
+          seance: seance
+            ? {
+                id: seance.id,
+                dureeMinutes: seance.dureeMinutes,
+                cahierRempli: seance.contenu !== CAHIER_A_COMPLETER,
+              }
+            : null,
+          absence: absence
+            ? {
+                id: absence.id,
+                justifiee: absence.justifiee,
+                motif: absence.motif,
+              }
+            : null,
+        },
+      ];
     });
     const compter = (etat: string) =>
       lignes.filter((ligne) => ligne.etat === etat).length;
@@ -472,9 +487,39 @@ export class PointageService {
     return creneau;
   }
 
+  private async creneauxLies(creneau: {
+    id: string;
+    coursId: string;
+    heureDebut: string;
+    heureFin: string;
+    regroupement: string | null;
+    cours: { enseignantId: string | null };
+  }) {
+    if (!creneau.regroupement) return [creneau];
+    return this.prisma.creneau.findMany({
+      where: { regroupement: creneau.regroupement },
+      include: { cours: true },
+    });
+  }
+
   async marquerPresent(body: Body, acteur: Acteur) {
     const { debut } = this.jour(body.date);
-    const creneau = await this.creneauDuJour(body.creneauId, debut);
+    const premier = await this.creneauDuJour(body.creneauId, debut);
+    for (const creneau of await this.creneauxLies(premier))
+      await this.presentSurCreneau(creneau, debut, acteur);
+    return this.enseignants(debut.toISOString());
+  }
+
+  private async presentSurCreneau(
+    creneau: {
+      coursId: string;
+      heureDebut: string;
+      heureFin: string;
+      cours: { enseignantId: string | null };
+    },
+    debut: Date,
+    acteur: Acteur,
+  ) {
     const enseignantId = creneau.cours.enseignantId;
     if (!enseignantId)
       throw new BadRequestException(
@@ -510,12 +555,27 @@ export class PointageService {
           },
         }),
       ]);
-    return this.enseignants(debut.toISOString());
   }
 
   async marquerAbsent(body: Body, acteur: Acteur) {
     const { debut } = this.jour(body.date);
-    const creneau = await this.creneauDuJour(body.creneauId, debut);
+    const premier = await this.creneauDuJour(body.creneauId, debut);
+    for (const creneau of await this.creneauxLies(premier))
+      await this.absentSurCreneau(creneau, debut, body, acteur);
+    return this.enseignants(debut.toISOString());
+  }
+
+  private async absentSurCreneau(
+    creneau: {
+      coursId: string;
+      heureDebut: string;
+      heureFin: string;
+      cours: { enseignantId: string | null };
+    },
+    debut: Date,
+    body: Body,
+    acteur: Acteur,
+  ) {
     const enseignantId = creneau.cours.enseignantId;
     if (!enseignantId)
       throw new BadRequestException(
@@ -558,13 +618,21 @@ export class PointageService {
       },
       update: donnees,
     });
+  }
+
+  // Remet un créneau (et ceux du même cours commun) à « à pointer ».
+  async annulerEmargement(creneauId: string, rawDate: unknown) {
+    const { debut } = this.jour(rawDate);
+    const premier = await this.creneauDuJour(creneauId, debut);
+    for (const creneau of await this.creneauxLies(premier))
+      await this.annulerSurCreneau(creneau, debut);
     return this.enseignants(debut.toISOString());
   }
 
-  // Remet un créneau à « à pointer ».
-  async annulerEmargement(creneauId: string, rawDate: unknown) {
-    const { debut } = this.jour(rawDate);
-    const creneau = await this.creneauDuJour(creneauId, debut);
+  private async annulerSurCreneau(
+    creneau: { coursId: string; heureDebut: string },
+    debut: Date,
+  ) {
     const ou = {
       coursId: creneau.coursId,
       date: debut,
@@ -592,7 +660,6 @@ export class PointageService {
       await this.prisma.seanceCours.delete({ where: { id: seance.id } });
     }
     await this.prisma.absenceEnseignant.deleteMany({ where: ou });
-    return this.enseignants(debut.toISOString());
   }
 
   // Récapitulatif du mois par enseignant : séances tenues, heures, absences.
@@ -624,10 +691,18 @@ export class PointageService {
         matricule: true,
         nom: true,
         prenom: true,
-        seances: { where: duMois, select: { dureeMinutes: true } },
+        seances: {
+          where: duMois,
+          select: { date: true, heureDebut: true, dureeMinutes: true },
+        },
         absencesCours: {
           where: duMois,
-          select: { dureeMinutes: true, justifiee: true },
+          select: {
+            date: true,
+            heureDebut: true,
+            dureeMinutes: true,
+            justifiee: true,
+          },
         },
       },
       orderBy: [{ nom: 'asc' }, { prenom: 'asc' }],
@@ -639,15 +714,22 @@ export class PointageService {
     return {
       annee,
       mois: moisNumero,
-      lignes: enseignants.map(({ seances, absencesCours, ...employe }) => ({
-        employe,
-        seances: seances.length,
-        heuresFaites: heures(seances),
-        absences: absencesCours.length,
-        absencesInjustifiees: absencesCours.filter((item) => !item.justifiee)
-          .length,
-        heuresManquees: heures(absencesCours),
-      })),
+      lignes: enseignants.map(
+        ({ seances: toutes, absencesCours: manquees, ...employe }) => {
+          const seances = seancesUniques(toutes);
+          const absencesCours = seancesUniques(manquees);
+          return {
+            employe,
+            seances: seances.length,
+            heuresFaites: heures(seances),
+            absences: absencesCours.length,
+            absencesInjustifiees: absencesCours.filter(
+              (item) => !item.justifiee,
+            ).length,
+            heuresManquees: heures(absencesCours),
+          };
+        },
+      ),
     };
   }
 }

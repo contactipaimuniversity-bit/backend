@@ -1694,6 +1694,235 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
 
   // ---------- Formulaire public des futurs étudiants ----------
 
+  it('réunit un pôle en tronc commun et partage un cours entre plusieurs classes', async () => {
+    const pole = await api('admin')
+      .post('/academique/poles', { nom: 'Pôle du tronc commun' })
+      .expect(201);
+    const filiere = async (code: string, nom: string, extra: Body = {}) =>
+      (
+        await api('admin')
+          .post('/academique/filieres', {
+            code,
+            nom,
+            poleId: pole.body.id,
+            ...extra,
+          })
+          .expect(201)
+      ).body.id as string;
+    const filiereA = await filiere('TCFA', 'Filière commune A');
+    await filiere('TCFB', 'Filière commune B');
+    // Un tronc commun appartient forcément à un pôle.
+    await api('admin')
+      .post('/academique/filieres', {
+        code: 'TCX',
+        nom: 'Tronc sans pôle',
+        troncCommun: true,
+      })
+      .expect(400);
+    const tronc = await filiere('TC-TST', 'Tronc commun test', {
+      troncCommun: true,
+    });
+    const tronc2 = await filiere('TC-TS2', 'Tronc commun deux', {
+      troncCommun: true,
+    });
+    // Même matière dans les deux maquettes de tronc commun.
+    for (const filiereId of [tronc, tronc2]) {
+      const ue = await api('admin')
+        .post('/academique/unites', {
+          filiereId,
+          niveau: 'L1',
+          semestre: 1,
+          code: 'TCU1',
+          nom: 'Unité transversale',
+          credits: 30,
+        })
+        .expect(201);
+      await api('admin')
+        .post('/academique/matieres', {
+          ueId: ue.body.id,
+          code: 'ANGC',
+          nom: 'Anglais commun',
+          coefficient: 1,
+          volumeHoraire: 30,
+        })
+        .expect(201);
+    }
+    const classe = async (filiereId: string) =>
+      (
+        await api('admin')
+          .post('/academique/classes', {
+            anneeAcademiqueId: ids.annee,
+            filiereId,
+            niveau: 'L1',
+          })
+          .expect(201)
+      ).body.id as string;
+    const classeTronc = await classe(tronc);
+    const classeTronc2 = await classe(tronc2);
+
+    // Les étudiants des filières du pôle sont proposés ; chacun garde sa filière.
+    const inscrire = async (nom: string, nomFiliere: string) =>
+      (
+        await api('admin')
+          .post('/inscriptions', {
+            nouvellePersonne: { nom, prenom: 'Tronc' },
+            anneeScolaire: libelleAnnee,
+            niveau: 'L1',
+            filiere: nomFiliere,
+          })
+          .expect(201)
+      ).body.id as string;
+    const etudiantA = await inscrire('Commun-A', 'Filière commune A');
+    const etudiantB = await inscrire('Commun-B', 'Filière commune B');
+    const candidats = (
+      await api('admin')
+        .get(`/academique/classes/${classeTronc}/candidats`)
+        .expect(200)
+    ).body as Body[];
+    expect(
+      candidats.filter((item) => [etudiantA, etudiantB].includes(item.id)),
+    ).toEqual([
+      expect.objectContaining({ correspond: true }),
+      expect.objectContaining({ correspond: true }),
+    ]);
+    expect(candidats.find((item) => item.id === etudiantA)!.filiere).toBe(
+      'Filière commune A',
+    );
+    await api('admin')
+      .post(`/academique/classes/${classeTronc}/affectations`, {
+        inscriptionIds: [etudiantA, etudiantB],
+      })
+      .expect(201);
+    const apres = (await api('admin').get(`/inscriptions/${etudiantA}`)).body;
+    expect(apres).toMatchObject({
+      classeId: classeTronc,
+      filiereId: filiereA,
+      filiere: 'Filière commune A',
+    });
+    // Un tronc commun n'a pas de tarif : il n'apparaît pas dans la grille.
+    const parametres = (
+      await api('admin').get('/frais-scolarite/parametres').expect(200)
+    ).body;
+    expect(parametres.filieres.some((item: Body) => item.id === tronc)).toBe(
+      false,
+    );
+
+    // Cours commun : un créneau, un enseignant, plusieurs classes.
+    const coursDe = async (classeId: string) =>
+      (
+        (
+          await api('admin')
+            .get(`/academique/cours?classeId=${classeId}`)
+            .expect(200)
+        ).body as Body[]
+      ).find((item) => item.matiere.code === 'ANGC')!.id as string;
+    const cours1 = await coursDe(classeTronc);
+    const cours2 = await coursDe(classeTronc2);
+    const communs = (
+      await api('admin').get(`/academique/cours/${cours1}/communs`).expect(200)
+    ).body as Body[];
+    expect(communs.map((item) => item.id)).toContain(cours2);
+    const prof = await api('rh')
+      .post('/rh/employes', {
+        nom: 'Commun',
+        prenom: 'Prof',
+        categorie: 'ENSEIGNANT_VACATAIRE',
+        fonction: 'Enseignant',
+        dateEmbauche: '2020-01-01',
+      })
+      .expect(201);
+    await api('admin')
+      .patch(`/academique/cours/${cours1}`, { enseignantId: prof.body.id })
+      .expect(200);
+
+    const veille = new Date();
+    veille.setUTCDate(veille.getUTCDate() - 1);
+    if (veille.getUTCDay() === 0) veille.setUTCDate(veille.getUTCDate() - 1);
+    const jour = veille.getUTCDay();
+    const creneau = await api('admin')
+      .post('/academique/creneaux', {
+        coursId: cours1,
+        jour,
+        heureDebut: '18:00',
+        heureFin: '19:30',
+        coursLies: [cours2],
+      })
+      .expect(201);
+    // Sans le lien, la même heure serait un conflit pour l'enseignant.
+    const conflit = await api('admin')
+      .post('/academique/creneaux', {
+        coursId: cours2,
+        jour,
+        heureDebut: '18:30',
+        heureFin: '19:00',
+      })
+      .expect(409);
+    expect(conflit.body.message).toMatch(/enseignant/i);
+    const grille = (
+      await api('admin')
+        .get(`/academique/emploi-du-temps?classeId=${classeTronc2}`)
+        .expect(200)
+    ).body as Body[];
+    expect(grille[0]).toMatchObject({
+      heureDebut: '18:00',
+      communAvec: ['TC-TST L1'],
+      cours: { enseignant: { id: prof.body.id } },
+    });
+
+    // Émargé une fois pour toutes ses classes, compté une fois pour l'enseignant.
+    const date = veille.toISOString().slice(0, 10);
+    if (veille.getUTCFullYear() === annee) {
+      const feuille = await api('scolarite')
+        .post('/rh/pointage/enseignants/presence', {
+          creneauId: creneau.body.id,
+          date,
+        })
+        .expect(201);
+      const lignes = (feuille.body.lignes as Body[]).filter(
+        (item) => item.heureDebut === '18:00',
+      );
+      expect(lignes).toHaveLength(1);
+      expect(lignes[0]).toMatchObject({
+        commun: true,
+        classe: 'TC-TS2 L1 · TC-TST L1',
+        etat: 'PRESENT',
+      });
+      const recap = (
+        await api('scolarite')
+          .get(
+            `/rh/pointage/enseignants/recapitulatif?annee=${veille.getUTCFullYear()}&mois=${veille.getUTCMonth() + 1}`,
+          )
+          .expect(200)
+      ).body;
+      expect(
+        recap.lignes.find((item: Body) => item.employe.id === prof.body.id),
+      ).toMatchObject({ seances: 1, heuresFaites: 1.5 });
+      await api('scolarite')
+        .delete(`/rh/pointage/enseignants/${creneau.body.id}?date=${date}`)
+        .expect(200);
+    }
+
+    // Retirer un cours commun le retire pour toutes ses classes.
+    await api('admin')
+      .delete(`/academique/creneaux/${creneau.body.id}`)
+      .expect(200);
+    expect(
+      (
+        await api('admin')
+          .get(`/academique/emploi-du-temps?classeId=${classeTronc2}`)
+          .expect(200)
+      ).body,
+    ).toHaveLength(0);
+    // Sortis de la classe, ils retrouvent leur filière intacte (et l'année reste clôturable).
+    for (const etudiant of [etudiantA, etudiantB])
+      await api('admin')
+        .delete(`/academique/classes/${classeTronc}/affectations/${etudiant}`)
+        .expect(200);
+    expect(
+      (await api('admin').get(`/inscriptions/${etudiantA}`)).body.filiereId,
+    ).toBe(filiereA);
+  });
+
   it('reçoit les lycéens par le formulaire public, sans rien exposer', async () => {
     const serveur = app.getHttpServer();
     const options = await request(serveur)

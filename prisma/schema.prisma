@@ -964,6 +964,9 @@ model Filiere {
   // Dernier niveau de la filière quand elle s'arrête avant la fin du cycle
   // (un parcours de technicien supérieur qui finit en L2, par exemple).
   niveauFinal String?
+  // Tronc commun d'un pôle : sa maquette et ses classes réunissent les
+  // étudiants de plusieurs filières du pôle, qui gardent chacun la leur.
+  troncCommun Boolean @default(false)
 
   classes      Classe[]
   unites       UniteEnseignement[]
@@ -1071,8 +1074,12 @@ model Creneau {
   heureFin   String
   salleId    String?
   salle      Salle?  @relation(fields: [salleId], references: [id])
+  // Cours commun à plusieurs classes : leurs créneaux partagent cette clé
+  // (un enseignant, une salle, une heure ; une seule séance payée).
+  regroupement String?
 
   @@index([coursId])
+  @@index([regroupement])
   @@map("creneaux")
 }
 

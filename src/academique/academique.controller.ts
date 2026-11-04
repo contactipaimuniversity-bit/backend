@@ -245,6 +245,12 @@ export class AcademiqueController {
     return this.structure.cours(query, acteurDe(request));
   }
 
+  // Même matière dans les autres classes de l'année : pour un cours commun.
+  @Get('cours/:id/communs')
+  coursCommuns(@Param('id') id: string) {
+    return this.structure.coursCommuns(id);
+  }
+
   @Patch('cours/:id')
   updateCours(@Param('id') id: string, @Body() body: Body) {
     return this.structure.updateCours(id, body);

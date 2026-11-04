@@ -95,8 +95,9 @@ export class FraisScolariteService {
           orderBy: { dateDebut: 'desc' },
         }),
         niveauxConnus(this.prisma),
+        // Un tronc commun n'a pas de tarif : chacun paie celui de sa filière.
         this.prisma.filiere.findMany({
-          where: { actif: true },
+          where: { actif: true, troncCommun: false },
           select: {
             id: true,
             code: true,

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -573,9 +574,21 @@ export class StructureService {
     return { poleId: pole.id };
   }
 
+  // Un tronc commun réunit les filières d'un pôle : il en faut un.
+  private troncCommunDe(body: Body, poleId: string | null | undefined) {
+    if (body.troncCommun === undefined) return {};
+    const troncCommun = body.troncCommun === true;
+    if (troncCommun && !poleId)
+      throw new BadRequestException(
+        'Un tronc commun appartient à un pôle : choisissez-le',
+      );
+    return { troncCommun };
+  }
+
   async createFiliere(body: Body) {
     const pole = await this.poleDe(body);
     const niveauFinal = await this.niveauFinalDe(body);
+    const troncCommun = this.troncCommunDe(body, pole.poleId);
     return this.unique(
       () =>
         this.prisma.filiere.create({
@@ -584,6 +597,7 @@ export class StructureService {
             nom: texteRequis(body.nom, 'Le nom de la filière', 2, 120),
             ...pole,
             ...niveauFinal,
+            ...troncCommun,
           },
           include: { pole: { select: { id: true, nom: true } } },
         }),
@@ -594,6 +608,14 @@ export class StructureService {
   async updateFiliere(id: string, body: Body) {
     const pole = await this.poleDe(body);
     const niveauFinal = await this.niveauFinalDe(body);
+    const actuelle = await this.prisma.filiere.findUnique({
+      where: { id },
+      select: { poleId: true },
+    });
+    const troncCommun = this.troncCommunDe(
+      body,
+      pole.poleId === undefined ? actuelle?.poleId : pole.poleId,
+    );
     return this.unique(
       () =>
         this.prisma.filiere.update({
@@ -602,6 +624,7 @@ export class StructureService {
           data: {
             ...pole,
             ...niveauFinal,
+            ...troncCommun,
             ...(body.code !== undefined
               ? { code: texteRequis(body.code, 'Le code', 2, 12).toUpperCase() }
               : {}),
@@ -736,7 +759,22 @@ export class StructureService {
           : {}),
       },
       include: {
-        filiere: { include: { pole: { select: { id: true, nom: true } } } },
+        // Le pôle et ses filières : l'emploi du temps d'un tronc commun les cite.
+        filiere: {
+          include: {
+            pole: {
+              select: {
+                id: true,
+                nom: true,
+                filieres: {
+                  where: { actif: true },
+                  select: { nom: true, troncCommun: true },
+                  orderBy: { nom: 'asc' },
+                },
+              },
+            },
+          },
+        },
         _count: { select: { inscriptions: true, cours: true } },
         deliberations: { select: { semestre: true, statut: true } },
       },
@@ -875,7 +913,10 @@ export class StructureService {
         niveau: classe.niveau,
         statut: { not: 'ABANDONNEE' },
       },
-      include: { personne: true },
+      include: {
+        personne: true,
+        filiereRef: { select: { nom: true, poleId: true } },
+      },
       orderBy: [{ personne: { nom: 'asc' } }, { personne: { prenom: 'asc' } }],
     });
     const cibles = [
@@ -884,13 +925,17 @@ export class StructureService {
     ];
     return inscriptions.map((inscription) => ({
       id: inscription.id,
-      filiere: inscription.filiere,
+      filiere: inscription.filiereRef?.nom ?? inscription.filiere,
       statut: inscription.statut,
       personne: inscription.personne,
-      // Le lien vers le référentiel fait foi ; sans lien, on compare le texte saisi.
-      correspond: inscription.filiereId
-        ? inscription.filiereId === classe.filiereId
-        : cibles.includes(normaliser(inscription.filiere)),
+      // Tronc commun : toutes les filières de son pôle lui correspondent.
+      // Sinon le lien vers le référentiel fait foi ; sans lien, on compare le texte saisi.
+      correspond: classe.filiere.troncCommun
+        ? Boolean(classe.filiere.poleId) &&
+          inscription.filiereRef?.poleId === classe.filiere.poleId
+        : inscription.filiereId
+          ? inscription.filiereId === classe.filiereId
+          : cibles.includes(normaliser(inscription.filiere)),
     }));
   }
 
@@ -938,13 +983,16 @@ export class StructureService {
           );
       }
       // L'affectation fixe la filière de l'inscription : celle de la classe.
+      // Un tronc commun réunit plusieurs filières : chacun garde la sienne.
       await transaction.inscription.updateMany({
         where: { id: { in: ids }, classeId: null },
-        data: {
-          classeId,
-          filiereId: classe.filiereId,
-          filiere: classe.filiere.nom,
-        },
+        data: classe.filiere.troncCommun
+          ? { classeId }
+          : {
+              classeId,
+              filiereId: classe.filiereId,
+              filiere: classe.filiere.nom,
+            },
       });
       return { affectes: ids.length };
     });
@@ -1648,6 +1696,38 @@ export class StructureService {
     }));
   }
 
+  // Les cours de la même matière (même nom) dans les autres classes de l'année :
+  // ce sont eux qu'un cours commun peut réunir à la même heure.
+  async coursCommuns(id: string) {
+    const cours = await this.prisma.cours.findUnique({
+      where: { id },
+      include: { matiere: true, classe: true },
+    });
+    if (!cours) throw new NotFoundException('Cours introuvable');
+    const autres = await this.prisma.cours.findMany({
+      where: {
+        id: { not: id },
+        classeId: { not: cours.classeId },
+        classe: { anneeAcademiqueId: cours.classe.anneeAcademiqueId },
+        matiere: { nom: { equals: cours.matiere.nom, mode: 'insensitive' } },
+      },
+      include: {
+        classe: { include: { filiere: true } },
+        enseignant: { select: { id: true, nom: true, prenom: true } },
+      },
+    });
+    return autres
+      .map((item) => ({
+        id: item.id,
+        classeId: item.classeId,
+        classeNom: this.nomClasse(item.classe),
+        enseignant: item.enseignant,
+      }))
+      .sort((first, second) =>
+        first.classeNom.localeCompare(second.classeNom, 'fr'),
+      );
+  }
+
   async updateCours(id: string, body: Body) {
     const cours = await this.prisma.cours.findUnique({ where: { id } });
     if (!cours) throw new NotFoundException('Cours introuvable');
@@ -1679,8 +1759,29 @@ export class StructureService {
           enseignantId,
           creneau.id,
           true,
+          creneau.regroupement,
         );
     }
+    // Un cours commun garde un seul enseignant pour toutes ses classes.
+    const regroupements = (
+      await this.prisma.creneau.findMany({
+        where: { coursId: id, regroupement: { not: null } },
+        select: { regroupement: true },
+      })
+    ).flatMap((item) => (item.regroupement ? [item.regroupement] : []));
+    const lies = regroupements.length
+      ? (
+          await this.prisma.creneau.findMany({
+            where: { regroupement: { in: regroupements } },
+            select: { coursId: true },
+          })
+        ).map((item) => item.coursId)
+      : [];
+    if (lies.length)
+      await this.prisma.cours.updateMany({
+        where: { id: { in: lies.filter((coursId) => coursId !== id) } },
+        data: { enseignantId },
+      });
     return this.prisma.cours.update({ where: { id }, data: { enseignantId } });
   }
 
@@ -1712,9 +1813,46 @@ export class StructureService {
       },
       orderBy: [{ jour: 'asc' }, { heureDebut: 'asc' }],
     });
+    const cles = [
+      ...new Set(
+        creneaux.flatMap((creneau) =>
+          creneau.regroupement ? [creneau.regroupement] : [],
+        ),
+      ),
+    ];
+    const lies = cles.length
+      ? await this.prisma.creneau.findMany({
+          where: { regroupement: { in: cles } },
+          select: {
+            id: true,
+            regroupement: true,
+            cours: {
+              select: {
+                classe: {
+                  select: {
+                    niveau: true,
+                    groupe: true,
+                    filiere: { select: { code: true } },
+                  },
+                },
+              },
+            },
+          },
+        })
+      : [];
     return creneaux.map((creneau) => ({
       ...creneau,
       classeNom: this.nomClasse(creneau.cours.classe),
+      // Les autres classes qui suivent ce même cours, à la même heure.
+      communAvec: lies
+        .filter(
+          (item) =>
+            creneau.regroupement &&
+            item.regroupement === creneau.regroupement &&
+            item.id !== creneau.id,
+        )
+        .map((item) => this.nomClasse(item.cours.classe))
+        .sort((first, second) => first.localeCompare(second, 'fr')),
     }));
   }
 
@@ -1731,6 +1869,7 @@ export class StructureService {
     enseignantId: string | null,
     sansCreneauId?: string,
     enseignantSeulement = false,
+    regroupement: string | null = null,
   ) {
     const classe = await this.prisma.classe.findUniqueOrThrow({
       where: { id: classeId },
@@ -1757,6 +1896,7 @@ export class StructureService {
       fin: minutes(creneau.heureFin),
     };
     for (const autre of autres) {
+      if (regroupement && autre.regroupement === regroupement) continue;
       if (
         !chevauche(plage, {
           debut: minutes(autre.heureDebut),
@@ -1803,8 +1943,76 @@ export class StructureService {
       });
       if (!salle?.actif) throw new BadRequestException('Salle indisponible');
     }
-    await this.verifierConflits(creneau, cours.classeId, cours.enseignantId);
-    return this.prisma.creneau.create({ data: creneau });
+    // Cours commun : le même créneau pour d'autres classes de l'année, chacune
+    // avec son propre cours de cette matière.
+    const liesIds = Array.isArray(body.coursLies)
+      ? [
+          ...new Set(
+            body.coursLies.filter(
+              (id): id is string => typeof id === 'string' && id !== coursId,
+            ),
+          ),
+        ]
+      : [];
+    const lies = liesIds.length
+      ? await this.prisma.cours.findMany({
+          where: { id: { in: liesIds } },
+          include: { classe: { include: { anneeAcademique: true } } },
+        })
+      : [];
+    if (lies.length !== liesIds.length)
+      throw new NotFoundException('Cours introuvable');
+    const classe = await this.prisma.classe.findUniqueOrThrow({
+      where: { id: cours.classeId },
+    });
+    const classes = new Set([cours.classeId]);
+    for (const lie of lies) {
+      if (lie.classe.anneeAcademiqueId !== classe.anneeAcademiqueId)
+        throw new BadRequestException(
+          'Un cours commun réunit des classes de la même année',
+        );
+      if (classes.has(lie.classeId))
+        throw new BadRequestException(
+          'Une classe ne peut figurer qu’une fois dans un cours commun',
+        );
+      classes.add(lie.classeId);
+    }
+    // Un cours commun n'a qu'un enseignant.
+    const enseignants = new Set(
+      [cours, ...lies].flatMap((item) =>
+        item.enseignantId ? [item.enseignantId] : [],
+      ),
+    );
+    if (enseignants.size > 1)
+      throw new BadRequestException(
+        "Un cours commun n'a qu'un enseignant : ces classes en ont un différent pour cette matière",
+      );
+    const enseignantId = [...enseignants][0] ?? null;
+    const regroupement = lies.length ? randomUUID() : null;
+    for (const item of [cours, ...lies])
+      await this.verifierConflits(
+        { ...creneau, coursId: item.id },
+        item.classeId,
+        enseignantId,
+        undefined,
+        false,
+        regroupement,
+      );
+    return this.prisma.$transaction(async (transaction) => {
+      if (enseignantId)
+        await transaction.cours.updateMany({
+          where: { id: { in: liesIds }, enseignantId: null },
+          data: { enseignantId },
+        });
+      const crees: Array<{ id: string }> = [];
+      for (const item of [cours, ...lies])
+        crees.push(
+          await transaction.creneau.create({
+            data: { ...creneau, coursId: item.id, regroupement },
+          }),
+        );
+      return crees[0];
+    });
   }
 
   async removeCreneau(id: string) {
@@ -1814,7 +2022,11 @@ export class StructureService {
     });
     if (!creneau) throw new NotFoundException('Créneau introuvable');
     await this.classeOuverte(creneau.cours.classeId);
-    await this.prisma.creneau.delete({ where: { id } });
+    if (creneau.regroupement)
+      await this.prisma.creneau.deleteMany({
+        where: { regroupement: creneau.regroupement },
+      });
+    else await this.prisma.creneau.delete({ where: { id } });
     return { supprime: true };
   }
 }

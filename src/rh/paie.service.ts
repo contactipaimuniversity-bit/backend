@@ -17,6 +17,7 @@ import {
   texteOptionnel,
   texteRequis,
 } from '../common/saisie';
+import { seancesUniques } from '../common/seances-uniques';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   bornesDuMois,
@@ -275,7 +276,12 @@ export class PaieService {
 
   // Heures et montant dus pour des séances, chacune au tarif de son contrat.
   private heuresAPayer(
-    seances: Array<{ id: string; date: Date; dureeMinutes: number }>,
+    seances: Array<{
+      id: string;
+      date: Date;
+      heureDebut: string;
+      dureeMinutes: number;
+    }>,
     contrats: Array<{
       dateDebut: Date;
       dateFin: Date | null;
@@ -285,7 +291,8 @@ export class PaieService {
   ) {
     let minutes = 0;
     let montant = 0;
-    for (const seance of seances) {
+    // Un cours commun à plusieurs classes est une seule séance pour l'enseignant.
+    for (const seance of seancesUniques(seances)) {
       const contrat =
         contrats.find(
           (item) =>
@@ -345,7 +352,12 @@ export class PaieService {
           // Toutes les heures tenues et pas encore réglées, mois antérieurs compris.
           seances: {
             where: { date: { lte: mois.fin }, periodePaieId: null },
-            select: { id: true, date: true, dureeMinutes: true },
+            select: {
+              id: true,
+              date: true,
+              heureDebut: true,
+              dureeMinutes: true,
+            },
           },
         },
       }),
@@ -570,7 +582,12 @@ export class PaieService {
         },
         seances: {
           where: aRegler,
-          select: { id: true, date: true, dureeMinutes: true },
+          select: {
+            id: true,
+            date: true,
+            heureDebut: true,
+            dureeMinutes: true,
+          },
           orderBy: { date: 'asc' },
         },
       },

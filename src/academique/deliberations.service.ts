@@ -497,9 +497,21 @@ export class DeliberationsService {
       filiereId: string;
       niveau: string;
       anneeAcademique: { libelle: string };
+      filiere?: { troncCommun: boolean };
     },
     lignes: Ligne[],
   ) {
+    // En tronc commun, chaque étudiant garde sa filière : ses crédits y sont comptés.
+    const filiereDe = classe.filiere?.troncCommun
+      ? new Map(
+          (
+            await this.prisma.inscription.findMany({
+              where: { id: { in: lignes.map((ligne) => ligne.inscriptionId) } },
+              select: { id: true, filiereId: true },
+            })
+          ).map((item) => [item.id, item.filiereId]),
+        )
+      : null;
     const semestres = await this.prisma.deliberation.findMany({
       where: {
         classeId: classe.id,
@@ -529,7 +541,7 @@ export class DeliberationsService {
           credits.push({
             personneId: ligne.personne.id,
             inscriptionId: ligne.inscriptionId,
-            filiereId: classe.filiereId,
+            filiereId: filiereDe?.get(ligne.inscriptionId) ?? classe.filiereId,
             niveau: classe.niveau,
             annee: classe.anneeAcademique.libelle,
             semestre: deliberation.semestre,
@@ -811,6 +823,9 @@ export class DeliberationsService {
             // Admis en dernière année : fin de cycle, pas de réinscription.
             niveauSuivant: !resultat ? null : admis ? suivant : classe.niveau,
             dejaInscrit: dejaInscrits.has(inscription.personneId),
+            // Sa propre filière : celle de la classe, sauf en tronc commun.
+            filiere: inscription.filiere,
+            filiereId: inscription.filiereId,
             // Admis avec dettes : crédits à repasser. Ajourné : crédits qu'il garde.
             creditsARattraper: total('DETTE'),
             creditsConserves: admis ? 0 : total('ACQUISE'),
@@ -820,7 +835,7 @@ export class DeliberationsService {
   }
 
   async reinscrire(classeId: string, body: Body, acteur: Acteur) {
-    const { classe, suivante, annee } = await this.contextePassage(classeId);
+    const { suivante, annee } = await this.contextePassage(classeId);
     if (!annee || annee.statut === 'CLOTUREE')
       throw new ConflictException(
         `Ouvrez d'abord l'année académique ${suivante} dans la structure académique`,
@@ -854,8 +869,8 @@ export class DeliberationsService {
           personneId: etudiant.personne.id,
           anneeScolaire: suivante,
           niveau: etudiant.niveauSuivant,
-          filiere: classe.filiere.nom,
-          filiereId: classe.filiereId,
+          filiere: etudiant.filiere,
+          filiereId: etudiant.filiereId ?? undefined,
         },
         acteur.id,
       );
@@ -1006,7 +1021,8 @@ export class DeliberationsService {
       this.prisma.creditUE.findMany({
         where: {
           personneId: inscription.personneId,
-          filiereId: classe.filiereId,
+          // En tronc commun, l'étudiant garde sa filière : ses unités y sont.
+          filiereId: inscription.filiereId ?? classe.filiereId,
         },
         orderBy: [{ niveau: 'asc' }, { semestre: 'asc' }, { code: 'asc' }],
       }),
