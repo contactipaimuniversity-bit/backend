@@ -32,6 +32,7 @@ type Absent = {
   justifiee: boolean;
   motif: string | null;
 };
+type Retard = { inscriptionId: string; minutes: number };
 
 // Séances tenues : appel des étudiants et cahier de textes.
 @Injectable()
@@ -90,6 +91,34 @@ export class ScolariteService {
       );
     return ids.map(
       (id) => absents.find((item) => item.inscriptionId === id) as Absent,
+    );
+  }
+
+  // Arrivés en retard : présents, mais en retard de tant de minutes.
+  private async retards(
+    body: Body,
+    classeId: string,
+    absents: Absent[],
+  ): Promise<Retard[]> {
+    if (!Array.isArray(body.retards)) return [];
+    const retards = (body.retards as Body[]).map((item) => ({
+      inscriptionId: texteRequis(item?.inscriptionId, "L'étudiant en retard"),
+      minutes: parseEntier(item?.minutes, 'Les minutes de retard', 1, 240),
+    }));
+    const ids = [...new Set(retards.map((item) => item.inscriptionId))];
+    if (ids.some((id) => absents.some((absent) => absent.inscriptionId === id)))
+      throw new BadRequestException(
+        'Un étudiant ne peut pas être à la fois absent et en retard',
+      );
+    const total = await this.prisma.inscription.count({
+      where: { id: { in: ids }, classeId },
+    });
+    if (total !== ids.length)
+      throw new BadRequestException(
+        "Un étudiant marqué en retard n'appartient pas à cette classe",
+      );
+    return ids.map(
+      (id) => retards.find((item) => item.inscriptionId === id) as Retard,
     );
   }
 
@@ -154,6 +183,7 @@ export class ScolariteService {
       where: { coursId: cours.id, date, heureDebut },
     });
     const absents = await this.absents(body, cours.classeId);
+    const retards = await this.retards(body, cours.classeId, absents);
     // Séance déjà émargée par la scolarité : la déclaration vient remplir son
     // cahier de textes et son appel, sans changer les heures émargées.
     if (doublon?.contenu === CAHIER_A_COMPLETER)
@@ -163,6 +193,12 @@ export class ScolariteService {
         });
         await transaction.absenceEtudiant.createMany({
           data: absents.map((absent) => ({ ...absent, seanceId: doublon.id })),
+        });
+        await transaction.retardEtudiant.deleteMany({
+          where: { seanceId: doublon.id },
+        });
+        await transaction.retardEtudiant.createMany({
+          data: retards.map((retard) => ({ ...retard, seanceId: doublon.id })),
         });
         return transaction.seanceCours.update({
           where: { id: doublon.id },
@@ -190,8 +226,9 @@ export class ScolariteService {
         saisieParId: acteur.id,
         saisieParNom: acteur.nom,
         absences: { create: absents },
+        retards: { create: retards },
       },
-      include: { absences: true },
+      include: { absences: true, retards: true },
     });
   }
 
@@ -224,6 +261,10 @@ export class ScolariteService {
       body.absents !== undefined
         ? await this.absents(body, cours.classeId)
         : null;
+    const retards =
+      body.retards !== undefined
+        ? await this.retards(body, cours.classeId, absents ?? [])
+        : null;
     return this.prisma.$transaction(async (transaction) => {
       if (absents) {
         await transaction.absenceEtudiant.deleteMany({
@@ -233,10 +274,18 @@ export class ScolariteService {
           data: absents.map((absent) => ({ ...absent, seanceId: id })),
         });
       }
+      if (retards) {
+        await transaction.retardEtudiant.deleteMany({
+          where: { seanceId: id },
+        });
+        await transaction.retardEtudiant.createMany({
+          data: retards.map((retard) => ({ ...retard, seanceId: id })),
+        });
+      }
       return transaction.seanceCours.update({
         where: { id },
         data,
-        include: { absences: true },
+        include: { absences: true, retards: true },
       });
     });
   }
@@ -273,6 +322,9 @@ export class ScolariteService {
       },
       include: {
         absences: {
+          include: { inscription: { include: { personne: true } } },
+        },
+        retards: {
           include: { inscription: { include: { personne: true } } },
         },
         enseignant: { select: { id: true, nom: true, prenom: true } },

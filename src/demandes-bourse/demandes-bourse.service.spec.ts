@@ -96,3 +96,26 @@ describe('DemandesBourseService.updateEntretien', () => {
     expect(updateMock).not.toHaveBeenCalled();
   });
 });
+
+describe('DemandesBourseService.exportEnAttente', () => {
+  it('exports only pending applications and applies the scholarship type filter', async () => {
+    const findMany = jest.fn().mockResolvedValue([]);
+    const prisma = {
+      demandeBourse: { findMany },
+    } as unknown as PrismaService;
+    const service = new DemandesBourseService(prisma);
+
+    await service.exportEnAttente('type-bourse-id');
+
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { statut: 'EN_ATTENTE', typeBourseId: 'type-bourse-id' },
+        include: expect.objectContaining({
+          personne: expect.any(Object),
+          elementsDossier: expect.any(Object),
+          paiements: expect.any(Object),
+        }),
+      }),
+    );
+  });
+});

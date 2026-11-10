@@ -427,6 +427,21 @@ export class PointageService {
                 id: seance.id,
                 dureeMinutes: seance.dureeMinutes,
                 cahierRempli: seance.contenu !== CAHIER_A_COMPLETER,
+                heureArrivee: seance.heureArrivee,
+                heureDepart: seance.heureDepart,
+                retardMinutes: seance.heureArrivee
+                  ? Math.max(
+                      0,
+                      minutes(seance.heureArrivee) -
+                        minutes(creneau.heureDebut),
+                    )
+                  : 0,
+                departAnticipeMinutes: seance.heureDepart
+                  ? Math.max(
+                      0,
+                      minutes(creneau.heureFin) - minutes(seance.heureDepart),
+                    )
+                  : 0,
               }
             : null,
           absence: absence
@@ -505,9 +520,39 @@ export class PointageService {
   async marquerPresent(body: Body, acteur: Acteur) {
     const { debut } = this.jour(body.date);
     const premier = await this.creneauDuJour(body.creneauId, debut);
+    const heures = {
+      arrivee:
+        body.heureArrivee === undefined || body.heureArrivee === ''
+          ? premier.heureDebut
+          : parseHeure(body.heureArrivee, "L'heure d'arrivée"),
+      depart:
+        body.heureDepart === undefined || body.heureDepart === ''
+          ? premier.heureFin
+          : parseHeure(body.heureDepart, "L'heure de départ"),
+    };
     for (const creneau of await this.creneauxLies(premier))
-      await this.presentSurCreneau(creneau, debut, acteur);
+      await this.presentSurCreneau(creneau, debut, acteur, heures);
     return this.enseignants(debut.toISOString());
+  }
+
+  // Temps réellement passé dans le créneau : c'est lui qui est payé, jamais plus
+  // que le créneau (arrivé en avance ou parti après, on s'arrête au créneau).
+  private tempsPasse(
+    creneau: { heureDebut: string; heureFin: string },
+    heures: { arrivee: string; depart: string },
+  ) {
+    if (minutes(heures.depart) <= minutes(heures.arrivee))
+      throw new BadRequestException(
+        "L'heure de départ doit suivre l'heure d'arrivée",
+      );
+    const duree =
+      Math.min(minutes(heures.depart), minutes(creneau.heureFin)) -
+      Math.max(minutes(heures.arrivee), minutes(creneau.heureDebut));
+    if (duree <= 0)
+      throw new BadRequestException(
+        `Ces heures sont en dehors du créneau (${creneau.heureDebut} – ${creneau.heureFin}) : rien ne serait payé. Marquez plutôt l'enseignant absent.`,
+      );
+    return duree;
   }
 
   private async presentSurCreneau(
@@ -519,7 +564,9 @@ export class PointageService {
     },
     debut: Date,
     acteur: Acteur,
+    heures: { arrivee: string; depart: string },
   ) {
+    const dureeMinutes = this.tempsPasse(creneau, heures);
     const enseignantId = creneau.cours.enseignantId;
     if (!enseignantId)
       throw new BadRequestException(
@@ -532,29 +579,50 @@ export class PointageService {
         heureDebut: creneau.heureDebut,
       },
     });
-    if (!existante)
-      await this.prisma.$transaction([
-        this.prisma.absenceEnseignant.deleteMany({
-          where: {
-            coursId: creneau.coursId,
-            date: debut,
-            heureDebut: creneau.heureDebut,
-          },
-        }),
-        this.prisma.seanceCours.create({
-          data: {
-            coursId: creneau.coursId,
-            date: debut,
-            heureDebut: creneau.heureDebut,
-            dureeMinutes:
-              minutes(creneau.heureFin) - minutes(creneau.heureDebut),
-            contenu: CAHIER_A_COMPLETER,
-            enseignantId,
-            saisieParId: acteur.id,
-            saisieParNom: acteur.nom,
-          },
-        }),
-      ]);
+    // Déjà émargée : on corrige ses heures, tant qu'elle n'est pas payée.
+    if (existante) {
+      if (existante.periodePaieId) {
+        const paie = await this.prisma.periodePaie.findUnique({
+          where: { id: existante.periodePaieId },
+        });
+        if (paie && paie.statut !== 'OUVERTE')
+          throw new ConflictException(
+            'Cette séance a déjà été payée à son enseignant : ses heures ne changent plus',
+          );
+      }
+      await this.prisma.seanceCours.update({
+        where: { id: existante.id },
+        data: {
+          heureArrivee: heures.arrivee,
+          heureDepart: heures.depart,
+          dureeMinutes,
+        },
+      });
+      return;
+    }
+    await this.prisma.$transaction([
+      this.prisma.absenceEnseignant.deleteMany({
+        where: {
+          coursId: creneau.coursId,
+          date: debut,
+          heureDebut: creneau.heureDebut,
+        },
+      }),
+      this.prisma.seanceCours.create({
+        data: {
+          coursId: creneau.coursId,
+          date: debut,
+          heureDebut: creneau.heureDebut,
+          heureArrivee: heures.arrivee,
+          heureDepart: heures.depart,
+          dureeMinutes,
+          contenu: CAHIER_A_COMPLETER,
+          enseignantId,
+          saisieParId: acteur.id,
+          saisieParNom: acteur.nom,
+        },
+      }),
+    ]);
   }
 
   async marquerAbsent(body: Body, acteur: Acteur) {
@@ -693,7 +761,12 @@ export class PointageService {
         prenom: true,
         seances: {
           where: duMois,
-          select: { date: true, heureDebut: true, dureeMinutes: true },
+          select: {
+            date: true,
+            heureDebut: true,
+            heureArrivee: true,
+            dureeMinutes: true,
+          },
         },
         absencesCours: {
           where: duMois,
@@ -727,6 +800,23 @@ export class PointageService {
               (item) => !item.justifiee,
             ).length,
             heuresManquees: heures(absencesCours),
+            // Arrivées après le début du créneau : nombre et minutes cumulées.
+            retards: seances.filter(
+              (seance) =>
+                seance.heureArrivee &&
+                minutes(seance.heureArrivee) > minutes(seance.heureDebut),
+            ).length,
+            minutesRetard: seances.reduce(
+              (total, seance) =>
+                total +
+                (seance.heureArrivee
+                  ? Math.max(
+                      0,
+                      minutes(seance.heureArrivee) - minutes(seance.heureDebut),
+                    )
+                  : 0),
+              0,
+            ),
           };
         },
       ),

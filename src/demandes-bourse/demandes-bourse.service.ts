@@ -313,6 +313,62 @@ export class DemandesBourseService {
       }));
   }
 
+  async exportEnAttente(rawTypeBourseId?: string) {
+    const typeBourseId = this.optionalString(rawTypeBourseId);
+    return this.prisma.demandeBourse.findMany({
+      where: {
+        statut: 'EN_ATTENTE',
+        ...(typeBourseId ? { typeBourseId } : {}),
+      },
+      include: {
+        personne: {
+          select: {
+            nom: true,
+            prenom: true,
+            telephone: true,
+            quartier: true,
+            dateNaissance: true,
+            lieuNaissance: true,
+            tuteurNom: true,
+            tuteurPrenom: true,
+            tuteurTelephone: true,
+            matricule: true,
+            sexe: true,
+          },
+        },
+        typeBourse: { select: { nom: true } },
+        elementsDossier: {
+          include: {
+            elementRequis: { select: { nom: true } },
+            elementSubstitutUtilise: { select: { nom: true } },
+            paiements: {
+              select: {
+                montant: true,
+                datePaiement: true,
+                typePaiement: true,
+                modePaiement: true,
+                numeroRecu: true,
+              },
+              orderBy: { datePaiement: 'asc' },
+            },
+          },
+          orderBy: { elementRequis: { nom: 'asc' } },
+        },
+        paiements: {
+          select: {
+            montant: true,
+            datePaiement: true,
+            typePaiement: true,
+            modePaiement: true,
+            numeroRecu: true,
+          },
+          orderBy: { datePaiement: 'asc' },
+        },
+      },
+      orderBy: [{ personne: { nom: 'asc' } }, { personne: { prenom: 'asc' } }],
+    });
+  }
+
   async findAll(search: SearchDemandesBourseDto) {
     const page = this.parsePagination(search.page, 1);
     const limit = this.parsePagination(search.limit, 20, 100);

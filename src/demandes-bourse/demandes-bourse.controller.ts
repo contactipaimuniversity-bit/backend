@@ -53,6 +53,11 @@ export class DemandesBourseController {
     return this.demandesBourseService.boursiers(typeBourseId, inscription);
   }
 
+  @Get('en-attente/export')
+  exportEnAttente(@Query('typeBourseId') typeBourseId?: string) {
+    return this.demandesBourseService.exportEnAttente(typeBourseId);
+  }
+
   @Delete(':id')
   remove(
     @Param('id') id: string,

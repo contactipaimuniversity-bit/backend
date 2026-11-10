@@ -146,10 +146,8 @@ export class CartesService {
         annee:
           inscription.classe?.anneeAcademique.libelle ??
           inscription.anneeScolaire,
-        filiere:
-          inscription.classe?.filiere.nom ??
-          inscription.filiereRef?.nom ??
-          inscription.filiere,
+        // Sa propre filière : en tronc commun, ce n'est pas celle de la classe.
+        filiere: inscription.filiereRef?.nom ?? inscription.filiere,
         niveau: inscription.classe?.niveau ?? inscription.niveau,
       });
     }
@@ -216,10 +214,8 @@ export class CartesService {
         statut: inscription.statut,
         anneeScolaire: inscription.anneeScolaire,
         niveau: inscription.classe?.niveau ?? inscription.niveau,
-        filiere:
-          inscription.classe?.filiere.nom ??
-          inscription.filiereRef?.nom ??
-          inscription.filiere,
+        // Sa propre filière : en tronc commun, ce n'est pas celle de la classe.
+        filiere: inscription.filiereRef?.nom ?? inscription.filiere,
         classe: inscription.classe
           ? `${inscription.classe.filiere.nom} ${inscription.classe.niveau} ${inscription.classe.groupe}`
           : null,

@@ -9,6 +9,7 @@ export const TYPES_DOCUMENT = [
   'BON_COMMANDE',
   'RAPPORT_ACTIVITE',
   'LISTE_BOURSIERS',
+  'LISTE_DEMANDES_BOURSE',
   'LISTE_INSCRITS',
   'BULLETIN_NOTES',
   'PV_DELIBERATION',
@@ -20,7 +21,7 @@ export const TYPES_DOCUMENT = [
   'ATTESTATION_REUSSITE',
   'DIPLOME',
 ] as const;
-const MODES = ['IMPRESSION', 'PDF'] as const;
+const MODES = ['IMPRESSION', 'PDF', 'EXCEL'] as const;
 const DOSSIERS = ['demande-bourse', 'inscription', 'depense'] as const;
 // Une impression faite hors ligne est déclarée au retour de la connexion.
 const RETARD_MAX_MS = 30 * 24 * 60 * 60 * 1000;

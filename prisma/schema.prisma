@@ -381,6 +381,7 @@ model Inscription {
   // Les classes suivies dans l'année, dans l'ordre (tronc commun puis filière…).
   historiqueClasses HistoriqueClasse[]
   absences          AbsenceEtudiant[]
+  retards           RetardEtudiant[]
   notes             Note[]
   resultats         ResultatDeliberation[]
   credits           CreditUE[]
@@ -1122,8 +1123,13 @@ model SeanceCours {
   horsCreneau   Boolean  @default(false)
   // Paie qui a réglé ces heures ; vide tant qu'elles restent à payer.
   periodePaieId String?
+  // Heures réelles d'arrivée et de départ de l'enseignant (émargement) ;
+  // dureeMinutes est alors le temps passé dans le créneau, celui qui est payé.
+  heureArrivee  String?
+  heureDepart   String?
 
   absences AbsenceEtudiant[]
+  retards  RetardEtudiant[]
 
   @@index([coursId, date])
   @@index([enseignantId, date])
@@ -1163,6 +1169,21 @@ model AbsenceEtudiant {
   @@unique([seanceId, inscriptionId])
   @@index([inscriptionId])
   @@map("absences_etudiants")
+}
+
+// Étudiant arrivé en retard à une séance : présent, mais en retard de tant de
+// minutes. Ce n'est pas une absence (les heures d'absence ne le comptent pas).
+model RetardEtudiant {
+  id            String      @id @default(uuid())
+  seanceId      String
+  seance        SeanceCours @relation(fields: [seanceId], references: [id], onDelete: Cascade)
+  inscriptionId String
+  inscription   Inscription @relation(fields: [inscriptionId], references: [id])
+  minutes       Int
+
+  @@unique([seanceId, inscriptionId])
+  @@index([inscriptionId])
+  @@map("retards_etudiants")
 }
 
 model Evaluation {
