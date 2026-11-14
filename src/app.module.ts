@@ -31,6 +31,7 @@ import { VersionInterceptor } from './common/version.interceptor';
 import { SynchronisationModule } from './synchronisation/synchronisation.module';
 import { FutursEtudiantsModule } from './futurs-etudiants/futurs-etudiants.module';
 import { CartesModule } from './cartes/cartes.module';
+import { EspaceEtudiantModule } from './espace-etudiant/espace-etudiant.module';
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { CartesModule } from './cartes/cartes.module';
     SynchronisationModule,
     FutursEtudiantsModule,
     CartesModule,
+    EspaceEtudiantModule,
   ],
   controllers: [AppController],
   providers: [

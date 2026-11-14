@@ -1,4 +1,5 @@
-const SECRET_KEY = /mot.?de.?passe|password|token|secret/i;
+const SECRET_KEY =
+  /mot.?de.?passe|password|token|secret|code.?activation|^code$/i;
 const MAX_STRING = 2000;
 
 // Copie sérialisable d'une valeur, sans les secrets : ce qui est journalisé

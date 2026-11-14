@@ -36,6 +36,9 @@ export class JwtAuthGuard implements CanActivate {
     try {
       const payload =
         await this.jwtService.verifyAsync<JwtAccessPayload>(token);
+      // Un jeton d'étudiant n'ouvre jamais l'espace de gestion.
+      if (payload.typ)
+        throw new UnauthorizedException('Utilisateur introuvable');
       const utilisateur = await this.prisma.utilisateur.findUnique({
         where: { id: payload.sub },
         select: { role: true, permissions: true },

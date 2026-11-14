@@ -238,6 +238,9 @@ model Personne {
 
   credits CreditUE[]
 
+  // Accès à l'espace étudiant (application mobile).
+  compteEtudiant CompteEtudiant?
+
   // Dernière modification : sert à refuser une modification faite hors ligne sur
   // une fiche changée entre-temps, et à ne retélécharger que ce qui a changé.
   modifieLe DateTime @default(now()) @updatedAt
@@ -1696,4 +1699,31 @@ model CarteEtudiant {
 
   @@index([inscriptionId])
   @@map("cartes_etudiant")
+}
+
+// Accès d'un étudiant à son espace (application mobile). L'administration
+// remet un code d'activation ; l'étudiant choisit alors son mot de passe.
+model CompteEtudiant {
+  id                String    @id @default(uuid())
+  personneId        String    @unique
+  personne          Personne  @relation(fields: [personneId], references: [id], onDelete: Cascade)
+  // Vide tant que le compte n'est pas activé.
+  motDePasse        String?
+  // Code d'activation (haché), à usage unique et limité dans le temps.
+  codeActivation    String?
+  codeExpireLe      DateTime?
+  codeCreeParNom    String?
+  codeCreeLe        DateTime?
+  activeLe          DateTime?
+  derniereConnexion DateTime?
+  // Tentatives manquées d'affilée : au-delà, le compte se bloque un moment.
+  echecs            Int       @default(0)
+  bloqueJusqua      DateTime?
+  // Augmente à chaque changement de mot de passe ou désactivation : les
+  // connexions ouvertes avant sont refusées.
+  versionJeton      Int       @default(0)
+  desactiveLe       DateTime?
+  creeLe            DateTime  @default(now())
+
+  @@map("comptes_etudiants")
 }

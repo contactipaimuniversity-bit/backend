@@ -296,6 +296,12 @@ export function requiredPermissionForRequest(
     return ['edit:finance-settings'];
   }
 
+  // Accès des étudiants à leur espace : suivi depuis la fiche de la personne.
+  if (sous('/comptes-etudiants'))
+    return isRead
+      ? ['view:people', 'view:enrollments']
+      : ['edit:people', 'edit:enrollments'];
+
   const routes: Array<[string, AccessArea]> = [
     ['/demandes-bourse', 'scholarships'],
     ['/inscriptions', 'enrollments'],

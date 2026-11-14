@@ -8,6 +8,8 @@ export type JwtAccessPayload = {
   role?: string;
   posteId?: string | null;
   permissions?: string[];
+  // Posé sur les jetons d'étudiant (« etudiant ») ; absent pour le personnel.
+  typ?: string;
 };
 
 export type AuthenticatedUser = JwtAccessPayload & {
