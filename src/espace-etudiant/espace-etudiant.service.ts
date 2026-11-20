@@ -9,6 +9,7 @@ import { JwtService } from '@nestjs/jwt';
 import bcrypt from 'bcryptjs';
 import { randomInt } from 'node:crypto';
 import { DeliberationsService } from '../academique/deliberations.service';
+import { AnnoncesService } from '../annonces/annonces.service';
 import { StructureService } from '../academique/structure.service';
 import { CloudinaryService } from '../fichiers/cloudinary.service';
 import { situationScolarite } from '../frais-scolarite/frais-scolarite.situation';
@@ -43,6 +44,7 @@ export class EspaceEtudiantService {
     private readonly structure: StructureService,
     private readonly deliberations: DeliberationsService,
     private readonly cloudinary: CloudinaryService,
+    private readonly annonces: AnnoncesService,
   ) {}
 
   // ---------- Comptes (côté administration) ----------
@@ -398,6 +400,19 @@ export class EspaceEtudiantService {
     return this.cloudinary.telechargerImage(
       personne.photoPublicId,
       format.toLowerCase(),
+    );
+  }
+
+  async annoncesPour(personneId: string) {
+    const inscription = await this.inscriptionCourante(personneId);
+    return this.annonces.pourEtudiant(
+      inscription && {
+        filiereId:
+          inscription.filiereId ?? inscription.classe?.filiereId ?? null,
+        niveau: inscription.niveau,
+        classeId: inscription.classeId,
+        classeNiveau: inscription.classe?.niveau ?? null,
+      },
     );
   }
 

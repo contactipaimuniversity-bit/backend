@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { DeliberationsService } from '../academique/deliberations.service';
 import { StructureService } from '../academique/structure.service';
+import { AnnoncesModule } from '../annonces/annonces.module';
 import { AuthModule } from '../auth/auth.module';
 import { CloudinaryService } from '../fichiers/cloudinary.service';
 import { InscriptionsService } from '../inscriptions/inscriptions.service';
@@ -14,7 +15,7 @@ import { EtudiantGuard } from './etudiant.guard';
 
 // Espace étudiant (application mobile installable).
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, AnnoncesModule],
   controllers: [
     EtudiantAuthController,
     EtudiantController,

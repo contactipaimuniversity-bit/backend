@@ -1727,3 +1727,27 @@ model CompteEtudiant {
 
   @@map("comptes_etudiants")
 }
+
+// Annonce de l'administration, lue par les étudiants dans leur espace.
+// Sans cible, elle s'adresse à tous ; sinon à une filière, un niveau ou une classe.
+model Annonce {
+  id          String    @id @default(uuid())
+  titre       String
+  contenu     String
+  // NORMALE ou IMPORTANTE (mise en avant chez l'étudiant)
+  importance  String    @default("NORMALE")
+  epinglee    Boolean   @default(false)
+  filiereId   String?
+  niveau      String?
+  classeId    String?
+  publieeLe   DateTime  @default(now())
+  // Après cette date, l'annonce n'est plus montrée.
+  expireLe    DateTime?
+  creeParId   String?
+  creeParNom  String
+  creeLe      DateTime  @default(now())
+  modifieLe   DateTime  @default(now()) @updatedAt
+
+  @@index([publieeLe])
+  @@map("annonces")
+}

@@ -54,6 +54,7 @@ export const ACCESS_AREAS = [
   'payment-validation',
   'tuition-settings',
   'tuition-adjustments',
+  'announcements',
 ] as const;
 
 // Tous les acteurs du circuit de dépense lisent les mêmes données ; le service
@@ -295,6 +296,10 @@ export function requiredPermissionForRequest(
       return ['edit:finance-settings', 'edit:expenses'];
     return ['edit:finance-settings'];
   }
+
+  // Annonces aux étudiants.
+  if (sous('/annonces'))
+    return [isRead ? 'view:announcements' : 'edit:announcements'];
 
   // Accès des étudiants à leur espace : suivi depuis la fiche de la personne.
   if (sous('/comptes-etudiants'))

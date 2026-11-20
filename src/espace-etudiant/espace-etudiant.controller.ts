@@ -56,6 +56,11 @@ export class EtudiantController {
     return new StreamableFile(contenu, { type });
   }
 
+  @Get('annonces')
+  annonces(@Req() request: RequeteEtudiant) {
+    return this.service.annoncesPour(request.etudiant.personneId);
+  }
+
   @Get('emploi-du-temps')
   emploiDuTemps(@Req() request: RequeteEtudiant) {
     return this.service.emploiDuTemps(request.etudiant.personneId);
