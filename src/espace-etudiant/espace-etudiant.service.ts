@@ -572,7 +572,15 @@ export class EspaceEtudiantService {
           'Paiement',
         numeroRecu: paiement.numeroRecu,
         mode: paiement.modePaiement,
+        // Pour l'aperçu du reçu (lecture seule) dans l'espace étudiant.
+        nature: libelles[paiement.typePaiement] ?? paiement.typePaiement,
+        encaissePar: paiement.saisiParNom,
+        enregistreLe: paiement.enregistreLe,
       })),
+      dossier: {
+        filiere: inscription.filiereRef?.nom ?? inscription.filiere,
+        niveau: inscription.classe?.niveau ?? inscription.niveau,
+      },
     };
   }
 
