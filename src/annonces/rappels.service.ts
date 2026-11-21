@@ -17,6 +17,25 @@ const PAIEMENT_INTERVALLE_MS = 60 * 60 * 1000;
 const PAIEMENT_HEURE_MIN = 8;
 const PAIEMENT_HEURE_MAX = 20;
 const PAIEMENT_JOURS = 7;
+// Paiements reçus : vérifiés chaque minute, pour une notification presque immédiate.
+const RECUS_INTERVALLE_MS = 60 * 1000;
+// Au démarrage, seuls les paiements de la dernière heure sont pris en compte
+// (pas de rafale de notifications pour l'historique après un déploiement).
+const RECUS_RATTRAPAGE_MS = 60 * 60 * 1000;
+const ENCAISSEMENTS = [
+  'MENSUALITE',
+  'FRAIS_ANNEXE',
+  'FRAIS_INSCRIPTION',
+  'ECHEANCE_BOURSE',
+  'FRAIS_DEPOT',
+] as const;
+const NATURES: Record<string, string> = {
+  MENSUALITE: 'Scolarité',
+  FRAIS_ANNEXE: 'Frais annexe',
+  FRAIS_INSCRIPTION: "Frais d'inscription",
+  ECHEANCE_BOURSE: 'Échéance de bourse',
+  FRAIS_DEPOT: 'Frais de dépôt',
+};
 // Les traces de rappels envoyés ne servent plus après quelques semaines.
 const CONSERVATION_JOURS = 60;
 
@@ -38,8 +57,11 @@ export class RappelsService implements OnModuleInit, OnModuleDestroy {
   // L'heure de l'école (les créneaux sont saisis en heure locale).
   private readonly fuseau = process.env.FUSEAU_HORAIRE || 'Africa/Brazzaville';
   private minuterie?: NodeJS.Timeout;
+  private minuterieRecus?: NodeJS.Timeout;
   private dernierPaiement = 0;
   private enCours = false;
+  private recusEnCours = false;
+  private readonly demarrage = Date.now();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -50,10 +72,119 @@ export class RappelsService implements OnModuleInit, OnModuleDestroy {
     this.minuterie = setInterval(() => void this.verifier(), INTERVALLE_MS);
     this.minuterie.unref();
     setTimeout(() => void this.verifier(), 20_000).unref();
+    this.minuterieRecus = setInterval(
+      () => void this.paiementsRecus(),
+      RECUS_INTERVALLE_MS,
+    );
+    this.minuterieRecus.unref();
   }
 
   onModuleDestroy() {
     if (this.minuterie) clearInterval(this.minuterie);
+    if (this.minuterieRecus) clearInterval(this.minuterieRecus);
+  }
+
+  /**
+   * « Paiement reçu » : dès qu'un encaissement est enregistré sur l'inscription
+   * d'un étudiant abonné (caisse, inscription, synchronisation hors ligne), une
+   * notification part sur son téléphone, avec le reste à payer.
+   */
+  async paiementsRecus() {
+    if (!this.push.actif || this.recusEnCours) return;
+    this.recusEnCours = true;
+    try {
+      const depuis = new Date(
+        Math.max(
+          Date.now() - 2 * 86_400_000,
+          this.demarrage - RECUS_RATTRAPAGE_MS,
+        ),
+      );
+      const paiements = await this.prisma.paiement.findMany({
+        where: {
+          enregistreLe: { gte: depuis },
+          typePaiement: { in: [...ENCAISSEMENTS] },
+          montant: { gt: 0 },
+          // Un encaissement annulé entre-temps ne s'annonce pas.
+          annulation: { is: null },
+          inscription: {
+            personne: {
+              compteEtudiant: {
+                desactiveLe: null,
+                abonnementsPush: { some: {} },
+              },
+            },
+          },
+        },
+        include: {
+          ligneScolarite: { select: { libelle: true } },
+          elementDossier: {
+            select: { elementRequis: { select: { nom: true } } },
+          },
+          inscription: {
+            select: {
+              id: true,
+              personne: {
+                select: {
+                  compteEtudiant: {
+                    select: { abonnementsPush: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+        orderBy: { enregistreLe: 'asc' },
+        take: 50,
+      });
+      for (const paiement of paiements) {
+        const appareils =
+          paiement.inscription?.personne.compteEtudiant?.abonnementsPush ?? [];
+        if (!paiement.inscription || !appareils.length) continue;
+        if (!(await this.reserver(`recu:${paiement.id}`))) continue;
+        const situation = await situationScolarite(
+          this.prisma,
+          paiement.inscription.id,
+        );
+        const reste = situation
+          ? situation.resteTotal +
+            situation.fraisInscription.reduce(
+              (total, ligne) => total + ligne.reste,
+              0,
+            )
+          : null;
+        const objet =
+          paiement.ligneScolarite?.libelle ??
+          paiement.elementDossier?.elementRequis.nom ??
+          NATURES[paiement.typePaiement] ??
+          'Paiement';
+        await this.push.envoyer(appareils, {
+          title: `Paiement reçu · ${montant(Number(paiement.montant))}`,
+          body: [
+            objet,
+            paiement.numeroRecu ? `Reçu ${paiement.numeroRecu}` : null,
+            reste === null
+              ? null
+              : reste > 0
+                ? `Reste à payer : ${montant(reste)}`
+                : 'Tout est réglé pour cette année.',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          url: `/etudiant/paiements?recu=${paiement.id}`,
+          tag: `recu-${paiement.id}`,
+        });
+        this.logger.log(
+          `Paiement reçu (${paiement.numeroRecu ?? paiement.id}) notifié à ${appareils.length} appareil(s)`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        'Notification des paiements reçus impossible',
+        error instanceof Error ? error.stack : String(error),
+      );
+    } finally {
+      this.recusEnCours = false;
+    }
   }
 
   /** Date, jour (1 = lundi) et heure dans le fuseau de l'école. */
