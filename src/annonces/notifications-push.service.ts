@@ -29,7 +29,7 @@ const texte = (value: unknown) =>
 @Injectable()
 export class NotificationsPushService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(NotificationsPushService.name);
-  private actif = false;
+  actif = false;
   private minuterie?: NodeJS.Timeout;
   private enCours: Promise<void> | null = null;
 
@@ -106,6 +106,27 @@ export class NotificationsPushService implements OnModuleInit, OnModuleDestroy {
         })
       : 0;
     return { disponible: this.actif, abonne: existe > 0 };
+  }
+
+  async preferences(compteId: string) {
+    const compte = await this.prisma.compteEtudiant.findUniqueOrThrow({
+      where: { id: compteId },
+      select: { rappelsCours: true, rappelsPaiement: true },
+    });
+    return compte;
+  }
+
+  async modifierPreferences(compteId: string, body: Body) {
+    const data: { rappelsCours?: boolean; rappelsPaiement?: boolean } = {};
+    if (typeof body.rappelsCours === 'boolean')
+      data.rappelsCours = body.rappelsCours;
+    if (typeof body.rappelsPaiement === 'boolean')
+      data.rappelsPaiement = body.rappelsPaiement;
+    return this.prisma.compteEtudiant.update({
+      where: { id: compteId },
+      data,
+      select: { rappelsCours: true, rappelsPaiement: true },
+    });
   }
 
   // Notification d'essai, envoyée au seul téléphone qui la demande.
@@ -224,7 +245,7 @@ export class NotificationsPushService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async envoyer(
+  async envoyer(
     abonnements: Array<{
       id: string;
       endpoint: string;

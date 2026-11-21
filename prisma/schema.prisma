@@ -1725,6 +1725,10 @@ model CompteEtudiant {
   desactiveLe       DateTime?
   creeLe            DateTime  @default(now())
 
+  // Rappels automatiques choisis par l'étudiant (les annonces partent toujours).
+  rappelsCours    Boolean @default(true)
+  rappelsPaiement Boolean @default(true)
+
   abonnementsPush AbonnementPush[]
 
   @@map("comptes_etudiants")
@@ -1769,4 +1773,14 @@ model AbonnementPush {
 
   @@index([compteId])
   @@map("abonnements_push")
+}
+
+// Rappel automatique déjà envoyé (cours qui commence, échéance proche) : la
+// clé dit quoi et quand, pour ne jamais l'envoyer deux fois.
+model RappelEnvoye {
+  cle      String   @id
+  envoyeLe DateTime @default(now())
+
+  @@index([envoyeLe])
+  @@map("rappels_envoyes")
 }

@@ -68,6 +68,20 @@ export class EtudiantController {
     );
   }
 
+  @Get('notifications/preferences')
+  preferencesNotifications(@Req() request: RequeteEtudiant) {
+    return this.push.preferences(request.etudiant.compteId);
+  }
+
+  @Post('notifications/preferences')
+  @HttpCode(200)
+  modifierPreferencesNotifications(
+    @Req() request: RequeteEtudiant,
+    @Body() body: Corps,
+  ) {
+    return this.push.modifierPreferences(request.etudiant.compteId, body);
+  }
+
   @Post('push/etat')
   @HttpCode(200)
   etatPush(@Req() request: RequeteEtudiant, @Body() body: Corps) {
