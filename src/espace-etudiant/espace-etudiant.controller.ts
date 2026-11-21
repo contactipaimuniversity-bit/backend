@@ -12,11 +12,23 @@ import {
 } from '@nestjs/common';
 import type { AuthenticatedRequest } from '../auth/authenticated-request';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { NotificationsPushService } from '../annonces/notifications-push.service';
 import { acteurDe } from '../common/acteur';
 import { EspaceEtudiantService } from './espace-etudiant.service';
 import { EtudiantGuard, type RequeteEtudiant } from './etudiant.guard';
 
 type Corps = Record<string, unknown>;
+
+// Clé publique des notifications push (nécessaire avant l'abonnement).
+@Controller('etudiant/push')
+export class EtudiantPushController {
+  constructor(private readonly push: NotificationsPushService) {}
+
+  @Get('cle')
+  cle() {
+    return this.push.cle();
+  }
+}
 
 // Connexion à l'espace étudiant : routes publiques.
 @Controller('etudiant/auth')
@@ -40,7 +52,42 @@ export class EtudiantAuthController {
 @Controller('etudiant/moi')
 @UseGuards(EtudiantGuard)
 export class EtudiantController {
-  constructor(private readonly service: EspaceEtudiantService) {}
+  constructor(
+    private readonly service: EspaceEtudiantService,
+    private readonly push: NotificationsPushService,
+  ) {}
+
+  // Notifications push : l'adresse d'abonnement passe dans le corps, jamais dans l'URL.
+  @Post('push')
+  @HttpCode(200)
+  abonner(@Req() request: RequeteEtudiant, @Body() body: Corps) {
+    return this.push.abonner(
+      request.etudiant.compteId,
+      body,
+      request.get('user-agent'),
+    );
+  }
+
+  @Post('push/etat')
+  @HttpCode(200)
+  etatPush(@Req() request: RequeteEtudiant, @Body() body: Corps) {
+    return this.push.etat(
+      request.etudiant.compteId,
+      typeof body.endpoint === 'string' ? body.endpoint : '',
+    );
+  }
+
+  @Post('push/desabonnement')
+  @HttpCode(200)
+  desabonner(@Req() request: RequeteEtudiant, @Body() body: Corps) {
+    return this.push.desabonner(request.etudiant.compteId, body);
+  }
+
+  @Post('push/essai')
+  @HttpCode(200)
+  essaiPush(@Req() request: RequeteEtudiant, @Body() body: Corps) {
+    return this.push.essai(request.etudiant.compteId, body);
+  }
 
   @Get()
   profil(@Req() request: RequeteEtudiant) {

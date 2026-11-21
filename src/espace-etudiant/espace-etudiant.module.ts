@@ -9,6 +9,7 @@ import {
   ComptesEtudiantsController,
   EtudiantAuthController,
   EtudiantController,
+  EtudiantPushController,
 } from './espace-etudiant.controller';
 import { EspaceEtudiantService } from './espace-etudiant.service';
 import { EtudiantGuard } from './etudiant.guard';
@@ -19,6 +20,7 @@ import { EtudiantGuard } from './etudiant.guard';
   controllers: [
     EtudiantAuthController,
     EtudiantController,
+    EtudiantPushController,
     ComptesEtudiantsController,
   ],
   providers: [

@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import type { Acteur } from '../common/acteur';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsPushService } from './notifications-push.service';
 
 type Body = Record<string, unknown>;
 
@@ -30,7 +31,10 @@ function dateOuNull(value: unknown, libelle: string) {
 // suppression, et lecture filtrée pour l'espace étudiant.
 @Injectable()
 export class AnnoncesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly push: NotificationsPushService,
+  ) {}
 
   private async donnees(body: Body, partiel: boolean) {
     const data: Record<string, unknown> = {};
@@ -184,6 +188,8 @@ export class AnnoncesService {
         creeParNom: acteur.nom,
       },
     });
+    // Publiée tout de suite : la notification part sans attendre la réponse.
+    void this.push.diffuser();
     return (await this.avecCibles([annonce]))[0];
   }
 
@@ -201,6 +207,8 @@ export class AnnoncesService {
         "La fin d'affichage doit venir après la publication",
       );
     const annonce = await this.prisma.annonce.update({ where: { id }, data });
+    // Une annonce programmée avancée à maintenant part tout de suite.
+    void this.push.diffuser();
     return (await this.avecCibles([annonce]))[0];
   }
 

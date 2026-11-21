@@ -1725,6 +1725,8 @@ model CompteEtudiant {
   desactiveLe       DateTime?
   creeLe            DateTime  @default(now())
 
+  abonnementsPush AbonnementPush[]
+
   @@map("comptes_etudiants")
 }
 
@@ -1747,7 +1749,24 @@ model Annonce {
   creeParNom  String
   creeLe      DateTime  @default(now())
   modifieLe   DateTime  @default(now()) @updatedAt
+  // Date d'envoi de la notification push ; vide tant qu'elle n'est pas partie.
+  notifieeLe  DateTime?
 
   @@index([publieeLe])
   @@map("annonces")
+}
+
+// Téléphone (ou navigateur) d'un étudiant abonné aux notifications push.
+model AbonnementPush {
+  id        String         @id @default(uuid())
+  compteId  String
+  compte    CompteEtudiant @relation(fields: [compteId], references: [id], onDelete: Cascade)
+  endpoint  String         @unique
+  p256dh    String
+  auth      String
+  appareil  String?
+  creeLe    DateTime       @default(now())
+
+  @@index([compteId])
+  @@map("abonnements_push")
 }
