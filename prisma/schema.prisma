@@ -1474,6 +1474,8 @@ model RubriquePaie {
   // Assiette plafonnée pour les pourcentages (vide : pas de plafond).
   plafond       Decimal? @db.Decimal(14, 2)
   appliqueATous Boolean  @default(false)
+  // Rubrique générale qui ne touche pas les vacataires (payés à la séance).
+  exclutVacataires Boolean @default(false)
   compteNumero  String?
   ordre         Int      @default(0)
   actif         Boolean  @default(true)

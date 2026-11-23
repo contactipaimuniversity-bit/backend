@@ -1226,16 +1226,19 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       net: '230400',
       chargesPatronales: '48672',
     });
-    // Vacataire : deux heures de cours déclarées au cahier de textes.
+    // Vacataire : deux heures de cours déclarées au cahier de textes, payées
+    // à la séance, sans CNSS ni charges patronales.
     expect(bulletin('enseignant')).toMatchObject({
       heuresVacation: '2',
       brut: '10000',
-      net: '9600',
+      totalRetenues: '0',
+      net: '10000',
+      chargesPatronales: '0',
     });
     expect(periode.body.totaux).toMatchObject({
       brut: 250000,
-      net: 240000,
-      coutTotal: 300700,
+      net: 240400,
+      coutTotal: 298672,
     });
 
     // Une avance saisie à la main diminue le net, puis est retirée.
@@ -1244,7 +1247,7 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
         ajustements: { AVANCE: 30000 },
       })
       .expect(200);
-    expect(avance.body.totaux.net).toBe(210000);
+    expect(avance.body.totaux.net).toBe(210400);
     await api('paie')
       .patch(`/paie/bulletins/${bulletin('secretaire').id}`, {
         ajustements: { INCONNUE: 5 },
@@ -1370,14 +1373,14 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     const etats = await api('comptable').get('/comptabilite/etats');
     expect(etats.body.resultat).toMatchObject({
       totalProduits: 50000,
-      totalCharges: 300700,
-      resultat: -250700,
+      totalCharges: 298672,
+      resultat: -248672,
     });
     expect(etats.body.tresorerie).toMatchObject({
       caisse: 50000,
-      banque: -240000,
+      banque: -240400,
       dettesPersonnel: 0,
-      dettesSociales: 60700,
+      dettesSociales: 58272,
     });
     expect(etats.body.bilan.totalActif).toBe(etats.body.bilan.totalPassif);
 
@@ -1450,7 +1453,7 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     const ligne = (budget.body.lignes as Body[]).find(
       (item) => item.categorieId === salaires.id,
     );
-    expect(ligne).toMatchObject({ paye: '300700.00', engage: '0.00' });
+    expect(ligne).toMatchObject({ paye: '298672.00', engage: '0.00' });
     // Les encaissements de l'exercice apparaissent en face des dépenses.
     expect(budget.body.totaux.recettes).toBe('50000.00');
   });
