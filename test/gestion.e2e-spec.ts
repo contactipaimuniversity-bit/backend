@@ -1287,6 +1287,27 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .expect(409);
   });
 
+  it('retrouve les bulletins de paie depuis la fiche de l’agent', async () => {
+    const fiche = await api('rh')
+      .get(`/rh/employes/${ids.secretaire}`)
+      .expect(200);
+    const [dernier] = fiche.body.bulletins as Body[];
+    expect(dernier).toMatchObject({
+      brut: '240000',
+      totalRetenues: '9600',
+      net: '230400',
+      periode: { mois: maintenant.getUTCMonth() + 1, statut: 'VALIDEE' },
+    });
+    // Le bulletin complet, tel qu'il s'imprime.
+    const complet = await api('paie')
+      .get(`/paie/bulletins/${dernier.id}`)
+      .expect(200);
+    expect(complet.body.numero).toBe(dernier.numero);
+    expect(complet.body.employe.id).toBe(ids.secretaire);
+    expect(complet.body.periode.annee).toBe(annee);
+    expect((complet.body.lignes as Body[]).length).toBeGreaterThan(0);
+  });
+
   // ---------- Comptabilité ----------
 
   const ecritures = async () =>
@@ -3870,5 +3891,74 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     await api('caissier').get('/demandes-bourse').expect(200);
     await api('caissier').post('/inscriptions', {}).expect(403);
     await api('caissier').post('/paiements', {}).expect(403);
+  });
+
+  it('retrouve une personne sans taper son nom exactement', async () => {
+    const inscription = await api('admin')
+      .post('/inscriptions', {
+        nouvellePersonne: {
+          nom: 'Dingazou',
+          prenom: 'Dominique Gérard',
+          telephone: '06 612 34 57',
+        },
+        anneeScolaire: '2033-2034',
+        niveau: 'L1',
+        filiere: 'Informatique',
+      })
+      .expect(201);
+    const demande = await api('admin')
+      .post('/demandes-bourse', {
+        nouvellePersonne: { nom: 'Nkounkoulou', prenom: 'Chancelle' },
+        niveauDemande: 'PREMIERE_ANNEE',
+        filiereSouhaitee: 'Informatique',
+      })
+      .expect(201);
+    const trouve = async (chemin: string, q: string) =>
+      (
+        (
+          await api('admin')
+            .get(`${chemin}?q=${encodeURIComponent(q)}`)
+            .expect(200)
+        ).body.data as Body[]
+      ).map((item) => item.id);
+
+    // Ordre des mots, accents, début de mot, faute de frappe, téléphone.
+    for (const q of [
+      'dominique dingazou',
+      'DINGAZOU Dominique',
+      'gerard',
+      'dingaz',
+      'dominik dingazou',
+      'dingazu',
+      '066123457',
+    ])
+      expect(await trouve('/inscriptions', q)).toContain(inscription.body.id);
+    for (const q of ['chancelle nkounkoulou', 'nkunkoulou', 'chancel'])
+      expect(await trouve('/demandes-bourse', q)).toContain(demande.body.id);
+    expect(await trouve('/personnes', 'dominik dingazou')).toContain(
+      inscription.body.personneId,
+    );
+    // Rien de trop éloigné, et les autres filtres restent appliqués.
+    expect(await trouve('/inscriptions', 'kouassi')).toEqual([]);
+    expect(
+      (
+        await api('admin')
+          .get('/inscriptions?q=dingazou&anneeScolaire=1999-2000')
+          .expect(200)
+      ).body.data,
+    ).toEqual([]);
+    // Personnel : prénom et nom dans le désordre, avec une faute.
+    expect(
+      (
+        (await api('rh').get('/rh/employes?q=paul mabiala').expect(200)).body
+          .data as Body[]
+      ).map((item) => item.id),
+    ).toContain(ids.enseignant);
+    expect(
+      (
+        (await api('rh').get('/rh/employes?q=mabyala').expect(200)).body
+          .data as Body[]
+      ).map((item) => item.id),
+    ).toContain(ids.enseignant);
   });
 });
