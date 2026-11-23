@@ -25,6 +25,7 @@ import {
   toTrashSnapshot,
 } from '../corbeille/corbeille.utils';
 import { parseDateOrder } from '../common/date-order';
+import { personnesCorrespondantes } from '../common/recherche';
 import { refuserSuppressionScolarite } from '../common/scolarite-guard';
 
 const STATUTS_INSCRIPTION = ['EN_COURS', 'COMPLETE', 'ABANDONNEE'] as const;
@@ -330,9 +331,12 @@ export class InscriptionsService {
         { filiere: { contains: query, mode: 'insensitive' } },
         { niveau: { contains: query, mode: 'insensitive' } },
         { anneeScolaire: { contains: query, mode: 'insensitive' } },
-        { personne: { nom: { contains: query, mode: 'insensitive' } } },
-        { personne: { prenom: { contains: query, mode: 'insensitive' } } },
-        { personne: { telephone: { contains: query, mode: 'insensitive' } } },
+        // Nom, prénom, téléphone ou matricule, en recherche souple.
+        {
+          personneId: {
+            in: await personnesCorrespondantes(this.prisma, query),
+          },
+        },
       ];
     }
 

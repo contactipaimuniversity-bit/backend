@@ -21,6 +21,7 @@ import {
   toTrashSnapshot,
 } from '../corbeille/corbeille.utils';
 import { parseDateOrder } from '../common/date-order';
+import { personnesCorrespondantes } from '../common/recherche';
 import { refuserSuppressionScolarite } from '../common/scolarite-guard';
 
 const NIVEAUX = ['PREMIERE_ANNEE', 'DEUXIEME_ANNEE'] as const;
@@ -401,9 +402,12 @@ export class DemandesBourseService {
       where.OR = [
         { filiereSouhaitee: { contains: query, mode: 'insensitive' } },
         { ecoleOrigine: { contains: query, mode: 'insensitive' } },
-        { personne: { nom: { contains: query, mode: 'insensitive' } } },
-        { personne: { prenom: { contains: query, mode: 'insensitive' } } },
-        { personne: { telephone: { contains: query, mode: 'insensitive' } } },
+        // Nom, prénom, téléphone ou matricule, en recherche souple.
+        {
+          personneId: {
+            in: await personnesCorrespondantes(this.prisma, query),
+          },
+        },
       ];
     }
 

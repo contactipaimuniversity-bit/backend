@@ -9,6 +9,7 @@ import { SearchCandidaturesPersonnelDto } from './dto/search-candidatures-person
 import { UpdateCandidaturePersonnelDto } from './dto/update-candidature-personnel.dto';
 import { UpdateElementPersonnelDto } from './dto/update-element-personnel.dto';
 import { parseDateOrder } from '../common/date-order';
+import { rechercheSouple } from '../common/recherche';
 
 const STATUTS = [
   'DEPOSE',
@@ -60,8 +61,25 @@ export class CandidaturesPersonnelService {
       where.statut = this.parse(search.statut, STATUTS, 'statut');
     if (query) {
       where.OR = [
-        { nom: { contains: query, mode: 'insensitive' } },
-        { prenom: { contains: query, mode: 'insensitive' } },
+        {
+          id: {
+            in: rechercheSouple(
+              (
+                await this.prisma.candidaturePersonnel.findMany({
+                  select: {
+                    id: true,
+                    nom: true,
+                    prenom: true,
+                  },
+                })
+              ).map((item) => ({
+                id: item.id,
+                textes: [item.nom, item.prenom],
+              })),
+              query,
+            ),
+          },
+        },
         { diplome: { contains: query, mode: 'insensitive' } },
         { fonction: { contains: query, mode: 'insensitive' } },
         { quartier: { contains: query, mode: 'insensitive' } },

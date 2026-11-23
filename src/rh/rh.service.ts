@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Acteur } from '../common/acteur';
 import { isUniqueConstraintViolation } from '../common/prisma-errors';
+import { rechercheSouple } from '../common/recherche';
 import {
   choix,
   dateOptionnelle,
@@ -252,6 +253,26 @@ export class RhService {
   }) {
     const { page, limit, skip } = pagination(query, 50);
     const q = query.q?.trim();
+    // Nom, prénom ou matricule en recherche souple ; fonction et service tels quels.
+    const trouves = q
+      ? rechercheSouple(
+          (
+            await this.prisma.employe.findMany({
+              select: {
+                id: true,
+                nom: true,
+                prenom: true,
+                matricule: true,
+                telephone: true,
+              },
+            })
+          ).map((item) => ({
+            id: item.id,
+            textes: [item.nom, item.prenom, item.matricule, item.telephone],
+          })),
+          q,
+        )
+      : [];
     const where = {
       ...(query.categorie === 'ENSEIGNANT'
         ? { categorie: { startsWith: 'ENSEIGNANT' } }
@@ -261,11 +282,12 @@ export class RhService {
       ...(query.statut ? { statut: query.statut } : {}),
       ...(q
         ? {
-            OR: ['nom', 'prenom', 'matricule', 'fonction', 'service'].map(
-              (champ) => ({
+            OR: [
+              { id: { in: trouves } },
+              ...['fonction', 'service'].map((champ) => ({
                 [champ]: { contains: q, mode: 'insensitive' as const },
-              }),
-            ),
+              })),
+            ],
           }
         : {}),
     };

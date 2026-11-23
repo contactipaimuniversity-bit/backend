@@ -15,6 +15,7 @@ import {
   toTrashSnapshot,
 } from '../corbeille/corbeille.utils';
 import { parseDateOrder } from '../common/date-order';
+import { personnesCorrespondantes } from '../common/recherche';
 
 @Injectable()
 export class PersonnesService {
@@ -66,19 +67,16 @@ export class PersonnesService {
       telephone?: { contains: string; mode: 'insensitive' };
       quartier?: { contains: string; mode: 'insensitive' };
     } = {};
+    // Recherche souple : ordre des mots, accents et fautes de frappe tolérés.
     if (nom) {
       where.OR = [
-        { nom: { contains: nom, mode: 'insensitive' } },
-        { prenom: { contains: nom, mode: 'insensitive' } },
+        { id: { in: await personnesCorrespondantes(this.prisma, nom) } },
       ];
     }
     if (query) {
       where.OR = [
-        { nom: { contains: query, mode: 'insensitive' } },
-        { prenom: { contains: query, mode: 'insensitive' } },
-        { telephone: { contains: query, mode: 'insensitive' } },
+        { id: { in: await personnesCorrespondantes(this.prisma, query) } },
         { quartier: { contains: query, mode: 'insensitive' } },
-        { matricule: { contains: query, mode: 'insensitive' } },
       ];
     }
     if (telephone) {

@@ -11,6 +11,7 @@ import { CreateThemeDto } from './dto/create-theme.dto';
 import { SearchProspectsDto } from './dto/search-prospects.dto';
 import { UpdateProspectDto } from './dto/update-prospect.dto';
 import { parseDateOrder } from '../common/date-order';
+import { personnesCorrespondantes } from '../common/recherche';
 import { Personne } from '../../generated/prisma/client';
 
 const STATUTS_RELANCE = [
@@ -132,9 +133,12 @@ export class ProspectsService {
       where.OR = [
         { filiereSouhaitee: { contains: query, mode: 'insensitive' } },
         { intention: { contains: query, mode: 'insensitive' } },
-        { personne: { nom: { contains: query, mode: 'insensitive' } } },
-        { personne: { prenom: { contains: query, mode: 'insensitive' } } },
-        { personne: { telephone: { contains: query, mode: 'insensitive' } } },
+        // Nom, prénom, téléphone ou matricule, en recherche souple.
+        {
+          personneId: {
+            in: await personnesCorrespondantes(this.prisma, query),
+          },
+        },
       ];
     }
 

@@ -8,6 +8,7 @@ import type { Prisma } from '../../generated/prisma/client';
 import { attribuerMatricules } from '../inscriptions/matricules';
 import { PrismaService } from '../prisma/prisma.service';
 import { parseDateOrder } from '../common/date-order';
+import { personnesCorrespondantes } from '../common/recherche';
 import type { SaisieLocale } from '../common/saisie-locale';
 import { AnnulerPaiementDto } from './dto/annuler-paiement.dto';
 import { CreatePaiementDto } from './dto/create-paiement.dto';
@@ -307,18 +308,16 @@ export class PaiementsService {
   async findAll(rawDateOrder?: string, rawQuery?: string, rawLimit?: string) {
     const ordreDate = parseDateOrder(rawDateOrder);
     const q = rawQuery?.trim().slice(0, 80);
-    const personne = (texte: string): Prisma.PersonneWhereInput => ({
-      OR: [
-        { nom: { contains: texte, mode: 'insensitive' } },
-        { prenom: { contains: texte, mode: 'insensitive' } },
-      ],
+    const personnes = q ? await personnesCorrespondantes(this.prisma, q) : [];
+    const personne = (): Prisma.PersonneWhereInput => ({
+      id: { in: personnes },
     });
     const where: Prisma.PaiementWhereInput | undefined = q
       ? {
           OR: [
             { numeroRecu: { contains: q, mode: 'insensitive' } },
-            { demandeBourse: { personne: personne(q) } },
-            { inscription: { personne: personne(q) } },
+            { demandeBourse: { personne: personne() } },
+            { inscription: { personne: personne() } },
           ],
         }
       : undefined;

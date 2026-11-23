@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { rechercheSouple } from '../common/recherche';
 import { meta, pagination } from '../common/saisie';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -204,7 +205,26 @@ export class FutursEtudiantsService {
     limit?: string;
   }) {
     const { page, limit, skip } = pagination(query, 50);
-    const termes = (query.q ?? '').trim().split(/\s+/).filter(Boolean);
+    const texte = (query.q ?? '').trim();
+    // Recherche souple : ordre des mots, accents et fautes de frappe tolérés.
+    const trouves = texte
+      ? rechercheSouple(
+          (
+            await this.prisma.futurEtudiant.findMany({
+              select: {
+                id: true,
+                nom: true,
+                prenom: true,
+                ecole: true,
+                tuteurNom: true,
+                tuteurTelephone: true,
+                telephone: true,
+              },
+            })
+          ).map(({ id, ...champs }) => ({ id, textes: Object.values(champs) })),
+          texte,
+        )
+      : null;
     const where = {
       // Saisie libre : « informatique » et « Informatique » sont la même filière.
       ...(query.filiere
@@ -220,18 +240,7 @@ export class FutursEtudiantsService {
         : query.contacte === 'non'
           ? { contacte: false }
           : {}),
-      AND: termes.slice(0, 4).map((terme) => ({
-        OR: [
-          'nom',
-          'prenom',
-          'ecole',
-          'tuteurNom',
-          'tuteurTelephone',
-          'telephone',
-        ].map((champ) => ({
-          [champ]: { contains: terme, mode: 'insensitive' as const },
-        })),
-      })),
+      ...(trouves ? { id: { in: trouves } } : {}),
     };
     const [total, data] = await Promise.all([
       this.prisma.futurEtudiant.count({ where }),

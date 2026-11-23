@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import type { Prisma } from '../../generated/prisma/client';
 import { type Acteur, peut } from '../common/acteur';
+import { personnesCorrespondantes } from '../common/recherche';
 import { PrismaService } from '../prisma/prisma.service';
 
 // Seuls les encaissements se remettent à la chargée des finances : les reports
@@ -47,18 +48,16 @@ const montant = (valeur: unknown) => Math.round(Number(valeur) * 100) / 100;
 export class RemisesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private where(filtres: Filtres): Prisma.PaiementWhereInput {
+  private async where(filtres: Filtres): Promise<Prisma.PaiementWhereInput> {
     const du = jour(filtres.du, false);
     const au = jour(filtres.au, true);
     const statut = STATUTS_REMISE.find((item) => item === filtres.statut);
     const type = TYPES_ENCAISSEMENT.find((item) => item === filtres.type);
     const mode = MODES.find((item) => item === filtres.mode);
     const q = filtres.q?.trim().slice(0, 80);
-    const personne = (texte: string): Prisma.PersonneWhereInput => ({
-      OR: [
-        { nom: { contains: texte, mode: 'insensitive' } },
-        { prenom: { contains: texte, mode: 'insensitive' } },
-      ],
+    const personnes = q ? await personnesCorrespondantes(this.prisma, q) : [];
+    const personne = (): Prisma.PersonneWhereInput => ({
+      id: { in: personnes },
     });
     return {
       typePaiement: type ?? { in: [...TYPES_ENCAISSEMENT] },
@@ -82,8 +81,8 @@ export class RemisesService {
               {
                 OR: [
                   { numeroRecu: { contains: q, mode: 'insensitive' } },
-                  { demandeBourse: { personne: personne(q) } },
-                  { inscription: { personne: personne(q) } },
+                  { demandeBourse: { personne: personne() } },
+                  { inscription: { personne: personne() } },
                 ],
               },
             ],
@@ -96,7 +95,7 @@ export class RemisesService {
   // caissier, jour et mode : ce que chacun doit remettre.
   async liste(filtres: Filtres) {
     const paiements = await this.prisma.paiement.findMany({
-      where: this.where(filtres),
+      where: await this.where(filtres),
       include: {
         demandeBourse: {
           select: {

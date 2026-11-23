@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { Prisma } from '../../generated/prisma/client';
 import { Acteur } from '../common/acteur';
+import { personnesCorrespondantes } from '../common/recherche';
 import {
   estDansLeFutur,
   parseDate,
@@ -996,6 +997,9 @@ export class DeliberationsService {
   // Unités dues par les étudiants admis avec dettes, et celles déjà rattrapées.
   async dettes(query: { statut?: string; q?: string }) {
     const recherche = query.q?.trim();
+    const trouves = recherche
+      ? await personnesCorrespondantes(this.prisma, recherche)
+      : [];
     const [credits, filieres, regles] = await Promise.all([
       this.prisma.creditUE.findMany({
         where: {
@@ -1006,13 +1010,7 @@ export class DeliberationsService {
               : { statut: 'DETTE' }),
           ...(recherche
             ? {
-                personne: {
-                  OR: [
-                    { nom: { contains: recherche, mode: 'insensitive' } },
-                    { prenom: { contains: recherche, mode: 'insensitive' } },
-                    { matricule: { contains: recherche, mode: 'insensitive' } },
-                  ],
-                },
+                personneId: { in: trouves },
               }
             : {}),
         },
@@ -1257,22 +1255,16 @@ export class DeliberationsService {
 
   // Étudiants (personnes affectées à une classe) par nom, prénom ou matricule.
   async rechercherEtudiants(q?: string) {
-    const termes = (q ?? '').trim().split(/\s+/).filter(Boolean).slice(0, 4);
-    if (!termes.length) return [];
+    if (!(q ?? '').trim()) return [];
+    // Recherche souple : ordre des mots, accents et fautes de frappe tolérés.
+    const trouves = await personnesCorrespondantes(this.prisma, q ?? '');
     const personnes = await this.prisma.personne.findMany({
       where: {
         OR: [
           { matricule: { not: null } },
           { inscriptions: { some: { classeId: { not: null } } } },
         ],
-        // « Prénom Nom » : chaque mot doit se retrouver quelque part.
-        AND: termes.map((terme) => ({
-          OR: [
-            { nom: { contains: terme, mode: 'insensitive' as const } },
-            { prenom: { contains: terme, mode: 'insensitive' as const } },
-            { matricule: { contains: terme, mode: 'insensitive' as const } },
-          ],
-        })),
+        id: { in: trouves },
       },
       select: {
         id: true,
