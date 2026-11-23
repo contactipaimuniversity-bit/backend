@@ -292,10 +292,14 @@ export class RhService {
         conges: { orderBy: { dateDebut: 'desc' }, take: 50 },
         absences: { orderBy: { date: 'desc' }, take: 50 },
         rubriques: { include: { rubrique: true } },
+        // Trois ans d'historique, du plus récent au plus ancien.
         bulletins: {
           include: { periode: true },
-          orderBy: { numero: 'desc' },
-          take: 12,
+          orderBy: [
+            { periode: { annee: 'desc' } },
+            { periode: { mois: 'desc' } },
+          ],
+          take: 36,
         },
         cours: {
           where: {
