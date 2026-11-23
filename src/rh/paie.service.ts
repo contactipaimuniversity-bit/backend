@@ -21,6 +21,7 @@ import { seancesUniques } from '../common/seances-uniques';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   bornesDuMois,
+  CATEGORIES_EMPLOYE,
   calculerBulletin,
   echeanceDue,
   joursCommuns,
@@ -169,9 +170,14 @@ export class PaieService {
             mode,
             valeur,
             plafond,
-            appliqueATous,
-            // Cotisations et primes fixes : salariés seulement.
-            exclutVacataires: appliqueATous && mode !== 'VARIABLE',
+            // Cotisations et primes fixes : salariés seulement (pas les
+            // vacataires, payés à la séance) ; montants du mois : tous.
+            categories: !appliqueATous
+              ? []
+              : CATEGORIES_EMPLOYE.filter(
+                  (item) =>
+                    mode === 'VARIABLE' || item !== 'ENSEIGNANT_VACATAIRE',
+                ),
             compteNumero,
             ordre,
           }),
@@ -180,6 +186,23 @@ export class PaieService {
       });
     return this.prisma.rubriquePaie.findMany({
       orderBy: [{ ordre: 'asc' }, { code: 'asc' }],
+      // Employés qui ont une valeur propre pour la rubrique.
+      include: {
+        employes: {
+          include: {
+            employe: {
+              select: {
+                id: true,
+                nom: true,
+                prenom: true,
+                matricule: true,
+                categorie: true,
+                statut: true,
+              },
+            },
+          },
+        },
+      },
     });
   }
 
@@ -198,10 +221,19 @@ export class PaieService {
         body.plafond === null || body.plafond === ''
           ? null
           : parseNombre(body.plafond, 'Le plafond', 1);
-    if (body.appliqueATous !== undefined)
-      data.appliqueATous = body.appliqueATous === true;
-    if (body.exclutVacataires !== undefined)
-      data.exclutVacataires = body.exclutVacataires === true;
+    if (body.categories !== undefined) {
+      if (!Array.isArray(body.categories))
+        throw new BadRequestException(
+          'Les catégories concernées doivent être une liste',
+        );
+      data.categories = [
+        ...new Set(
+          body.categories.map((item) =>
+            choix(item, CATEGORIES_EMPLOYE, 'La catégorie'),
+          ),
+        ),
+      ];
+    }
     if (body.compteNumero !== undefined)
       data.compteNumero = texteOptionnel(body.compteNumero, 12);
     if (body.ordre !== undefined)
@@ -389,9 +421,6 @@ export class PaieService {
         joursCouverts += jours;
       }
       const contrat = contrats[0];
-      // Un vacataire est payé à la séance : les rubriques réservées aux
-      // salariés (CNSS, primes fixes…) ne le concernent pas.
-      const vacataire = contrat.type === 'VACATION';
       // Les heures ne sont versées qu'à l'échéance du contrat, ou plus tôt si
       // la RH l'a demandé pour cette paie. Chaque séance est payée au tarif du
       // contrat en vigueur le jour où elle a été tenue.
@@ -430,8 +459,9 @@ export class PaieService {
         const propre = employe.rubriques.find(
           (item) => item.rubriqueId === rubrique.id,
         );
-        if (!propre && !rubrique.appliqueATous) return [];
-        if (!propre && vacataire && rubrique.exclutVacataires) return [];
+        // Une valeur propre s'applique toujours ; sinon, la catégorie décide.
+        if (!propre && !rubrique.categories.includes(employe.categorie))
+          return [];
         return [
           {
             code: rubrique.code,

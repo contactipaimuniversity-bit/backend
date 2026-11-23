@@ -3964,4 +3964,58 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       ).map((item) => item.id),
     ).toContain(ids.enseignant);
   });
+
+  it('applique chaque rubrique aux catégories choisies et aux valeurs propres', async () => {
+    const rubrique = await api('paie')
+      .post('/paie/rubriques', {
+        code: 'PRIME_CAT',
+        libelle: 'Prime des administratifs',
+        type: 'GAIN',
+        mode: 'FIXE',
+        valeur: 5000,
+        categories: ['ADMINISTRATIF'],
+      })
+      .expect(201);
+    expect(rubrique.body.categories).toEqual(['ADMINISTRATIF']);
+    await api('paie')
+      .patch(`/paie/rubriques/${rubrique.body.id}`, { categories: ['CHEF'] })
+      .expect(400);
+    // Le vacataire n'est pas dans la catégorie, mais reçoit une valeur propre.
+    await api('paie')
+      .put(`/paie/employes/${ids.enseignant}/rubriques`, {
+        rubriqueId: rubrique.body.id,
+        valeur: 7000,
+      })
+      .expect(200);
+    const liste = await api('paie').get('/paie/rubriques').expect(200);
+    const enregistree = (liste.body as Body[]).find(
+      (item) => item.code === 'PRIME_CAT',
+    )!;
+    expect(enregistree.employes).toHaveLength(1);
+    expect(enregistree.employes[0].employe.id).toBe(ids.enseignant);
+    // La CNSS est réservée aux salariés.
+    expect(
+      (liste.body as Body[]).find((item) => item.code === 'CNSS')!.categories,
+    ).not.toContain('ENSEIGNANT_VACATAIRE');
+
+    // Paie d'un mois sans autre paie (le mois précédent est déjà pris) : la
+    // prime suit la catégorie et la valeur propre.
+    const precedent = new Date(
+      Date.UTC(annee, maintenant.getUTCMonth() - 3, 1),
+    );
+    const periode = await api('paie')
+      .post('/paie/periodes', {
+        annee: precedent.getUTCFullYear(),
+        mois: precedent.getUTCMonth() + 1,
+      })
+      .expect(201);
+    const prime = (employe: string) =>
+      (
+        (periode.body.bulletins as Body[]).find(
+          (item) => item.employeId === ids[employe],
+        )?.lignes as Body[]
+      ).find((ligne) => ligne.code === 'PRIME_CAT')?.montant;
+    expect(prime('secretaire')).toBe(5000);
+    expect(prime('enseignant')).toBe(7000);
+  });
 });
