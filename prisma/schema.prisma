@@ -1737,6 +1737,27 @@ model CompteEtudiant {
   @@map("comptes_etudiants")
 }
 
+// Diapositive du grand carrousel de la vitrine publique : une image, un
+// surtitre, un titre, un texte et un bouton, choisis par l'administration.
+model DiapositiveVitrine {
+  id             String   @id @default(uuid())
+  surtitre       String?
+  titre          String
+  texte          String?
+  boutonLibelle  String?
+  boutonLien     String?
+  imagePublicId  String?
+  imageUrl       String?
+  ordre          Int      @default(0)
+  actif          Boolean  @default(true)
+  creeParNom     String
+  creeLe         DateTime @default(now())
+  modifieLe      DateTime @updatedAt
+
+  @@index([actif, ordre])
+  @@map("diapositives_vitrine")
+}
+
 // Annonce de l'administration, lue par les étudiants dans leur espace.
 // Sans cible, elle s'adresse à tous ; sinon à une filière, un niveau ou une classe.
 model Annonce {

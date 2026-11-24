@@ -4018,4 +4018,92 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
     expect(prime('secretaire')).toBe(5000);
     expect(prime('enseignant')).toBe(7000);
   });
+
+  it('gère le carrousel de la vitrine et ne publie que les diapositives actives', async () => {
+    const serveur = app.getHttpServer();
+    // Sans connexion : la vitrine lit la liste publique, vide au départ.
+    const vide = await request(serveur)
+      .get('/vitrine/diapositives')
+      .expect(200);
+    expect(vide.body).toEqual([]);
+    await request(serveur).get('/vitrine/gestion/diapositives').expect(401);
+    // Un poste sans le droit « Site vitrine » ne gère pas le carrousel.
+    await api('rh').get('/vitrine/gestion/diapositives').expect(403);
+
+    const png = Buffer.from('89504e470d0a1a0a', 'hex');
+    const ajouter = (champs: Record<string, string>, image = true) => {
+      let requete = request(serveur)
+        .post('/vitrine/gestion/diapositives')
+        .set('Authorization', `Bearer ${tokens.admin}`);
+      for (const [cle, valeur] of Object.entries(champs))
+        requete = requete.field(cle, valeur);
+      return image
+        ? requete.attach('image', png, {
+            filename: 'campus.png',
+            contentType: 'image/png',
+          })
+        : requete;
+    };
+    // L'image est obligatoire, et le bouton a besoin d'un lien valable.
+    await ajouter({ titre: 'Sans image' }, false).expect(400);
+    await ajouter({
+      titre: 'Lien douteux',
+      boutonLibelle: 'Voir',
+      boutonLien: 'javascript:alert(1)',
+    }).expect(400);
+
+    const premiere = await ajouter({
+      surtitre: 'Rentrée 2026-2027',
+      titre: 'Innover. Former. Transformer.',
+      texte: 'BTS et Licences professionnalisantes.',
+      boutonLibelle: 'Je me pré-inscris',
+      boutonLien: '/enregistrements',
+    }).expect(201);
+    expect(premiere.body).toHaveLength(1);
+    const seconde = await ajouter({ titre: 'Bourse locale 2026-2027' }).expect(
+      201,
+    );
+    const [a, b] = seconde.body as Body[];
+    expect(b.ordre).toBeGreaterThan(a.ordre);
+
+    // Le public ne voit ni l'auteur ni l'adresse d'hébergement de l'image.
+    const publiques = await request(serveur)
+      .get('/vitrine/diapositives')
+      .expect(200);
+    expect(publiques.body.map((item: Body) => item.titre)).toEqual([
+      'Innover. Former. Transformer.',
+      'Bourse locale 2026-2027',
+    ]);
+    expect(publiques.body[0].image).toMatch(
+      new RegExp(`^/vitrine/diapositives/${a.id}/image\\?v=\\d+$`),
+    );
+    expect(publiques.body[0].creeParNom).toBeUndefined();
+    expect(publiques.body[0].imageUrl).toBeUndefined();
+
+    // Nouvel ordre, puis une diapositive masquée disparaît du site.
+    await api('admin')
+      .post('/vitrine/gestion/ordre', { ids: [b.id] })
+      .expect(400);
+    await api('admin')
+      .post('/vitrine/gestion/ordre', { ids: [b.id, a.id] })
+      .expect(201);
+    await request(serveur)
+      .patch(`/vitrine/gestion/diapositives/${a.id}`)
+      .set('Authorization', `Bearer ${tokens.admin}`)
+      .field('actif', 'false')
+      .field('titre', 'Innover. Former. Transformer.')
+      .expect(200);
+    const apres = await request(serveur)
+      .get('/vitrine/diapositives')
+      .expect(200);
+    expect(apres.body.map((item: Body) => item.id)).toEqual([b.id]);
+
+    await api('admin')
+      .delete(`/vitrine/gestion/diapositives/${b.id}`)
+      .expect(200);
+    const fin = await api('admin')
+      .get('/vitrine/gestion/diapositives')
+      .expect(200);
+    expect(fin.body.map((item: Body) => item.id)).toEqual([a.id]);
+  });
 });

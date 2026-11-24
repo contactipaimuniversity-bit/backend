@@ -33,6 +33,7 @@ import { FutursEtudiantsModule } from './futurs-etudiants/futurs-etudiants.modul
 import { CartesModule } from './cartes/cartes.module';
 import { EspaceEtudiantModule } from './espace-etudiant/espace-etudiant.module';
 import { AnnoncesModule } from './annonces/annonces.module';
+import { VitrineModule } from './vitrine/vitrine.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { AnnoncesModule } from './annonces/annonces.module';
     CartesModule,
     EspaceEtudiantModule,
     AnnoncesModule,
+    VitrineModule,
   ],
   controllers: [AppController],
   providers: [

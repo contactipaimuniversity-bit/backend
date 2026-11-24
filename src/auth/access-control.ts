@@ -55,6 +55,7 @@ export const ACCESS_AREAS = [
   'tuition-settings',
   'tuition-adjustments',
   'announcements',
+  'website',
 ] as const;
 
 // Tous les acteurs du circuit de dépense lisent les mêmes données ; le service
@@ -296,6 +297,10 @@ export function requiredPermissionForRequest(
       return ['edit:finance-settings', 'edit:expenses'];
     return ['edit:finance-settings'];
   }
+
+  // Carrousel de la vitrine publique.
+  if (sous('/vitrine/gestion'))
+    return [isRead ? 'view:website' : 'edit:website'];
 
   // Annonces aux étudiants.
   if (sous('/annonces'))
