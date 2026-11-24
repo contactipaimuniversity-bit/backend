@@ -4115,17 +4115,23 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
 
   it('publie les actualités et les questions fréquentes de la vitrine', async () => {
     const serveur = app.getHttpServer();
-    // Contenu de départ : quinze actualités, la plus récente à la une, et six questions.
+    // Contenu de départ : quatorze actualités, la plus récente à la une, et cinq
+    // questions (celles qui parlaient de Pointe-Noire ont été retirées).
     const depart = await request(serveur)
       .get('/vitrine/actualites')
       .expect(200);
-    expect(depart.body).toHaveLength(15);
+    expect(depart.body).toHaveLength(14);
+    expect(
+      (depart.body as Body[]).some((item) =>
+        /Pointe-Noire/.test(`${item.titre} ${item.resume}`),
+      ),
+    ).toBe(false);
     expect(depart.body[0].aLaUne).toBe(true);
     expect(depart.body[0].creeParNom).toBeUndefined();
     const questions = await request(serveur)
       .get('/vitrine/questions')
       .expect(200);
-    expect(questions.body).toHaveLength(6);
+    expect(questions.body).toHaveLength(5);
     await api('rh').get('/vitrine/gestion/actualites').expect(403);
 
     // Une actualité sans image, puis une autre mise à la une : une seule le reste.
@@ -4184,22 +4190,22 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       })
       .expect(201);
     const ids = (liste.body as Body[]).map((item) => item.id as string);
-    expect(ids).toHaveLength(7);
+    expect(ids).toHaveLength(6);
     await api('admin')
       .post('/vitrine/gestion/questions/ordre', { ids: ids.slice(1) })
       .expect(400);
     const reordonnees = await api('admin')
       .post('/vitrine/gestion/questions/ordre', {
-        ids: [ids[6], ...ids.slice(0, 6)],
+        ids: [ids[5], ...ids.slice(0, 5)],
       })
       .expect(201);
     expect(reordonnees.body[0].question).toBe('Y a-t-il des cours du soir ?');
     await api('admin')
-      .patch(`/vitrine/gestion/questions/${ids[6]}`, { actif: false })
+      .patch(`/vitrine/gestion/questions/${ids[5]}`, { actif: false })
       .expect(200);
     const visibles = await request(serveur)
       .get('/vitrine/questions')
       .expect(200);
-    expect(visibles.body).toHaveLength(6);
+    expect(visibles.body).toHaveLength(5);
   });
 });
