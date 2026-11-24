@@ -4021,11 +4021,17 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
 
   it('gère le carrousel de la vitrine et ne publie que les diapositives actives', async () => {
     const serveur = app.getHttpServer();
-    // Sans connexion : la vitrine lit la liste publique, vide au départ.
-    const vide = await request(serveur)
+    // Sans connexion : la vitrine lit la liste publique, avec les trois
+    // diapositives de départ (sans image), que l'on retire pour la suite.
+    const depart = await request(serveur)
       .get('/vitrine/diapositives')
       .expect(200);
-    expect(vide.body).toEqual([]);
+    expect(depart.body).toHaveLength(3);
+    expect(depart.body.every((item: Body) => item.image === null)).toBe(true);
+    for (const item of depart.body as Body[])
+      await api('admin')
+        .delete(`/vitrine/gestion/diapositives/${item.id}`)
+        .expect(200);
     await request(serveur).get('/vitrine/gestion/diapositives').expect(401);
     // Un poste sans le droit « Site vitrine » ne gère pas le carrousel.
     await api('rh').get('/vitrine/gestion/diapositives').expect(403);
@@ -4105,5 +4111,95 @@ suite('Gestion académique, RH, paie et comptabilité (e2e)', () => {
       .get('/vitrine/gestion/diapositives')
       .expect(200);
     expect(fin.body.map((item: Body) => item.id)).toEqual([a.id]);
+  });
+
+  it('publie les actualités et les questions fréquentes de la vitrine', async () => {
+    const serveur = app.getHttpServer();
+    // Contenu de départ : quinze actualités, la plus récente à la une, et six questions.
+    const depart = await request(serveur)
+      .get('/vitrine/actualites')
+      .expect(200);
+    expect(depart.body).toHaveLength(15);
+    expect(depart.body[0].aLaUne).toBe(true);
+    expect(depart.body[0].creeParNom).toBeUndefined();
+    const questions = await request(serveur)
+      .get('/vitrine/questions')
+      .expect(200);
+    expect(questions.body).toHaveLength(6);
+    await api('rh').get('/vitrine/gestion/actualites').expect(403);
+
+    // Une actualité sans image, puis une autre mise à la une : une seule le reste.
+    await api('admin')
+      .post('/vitrine/gestion/actualites', {
+        titre: 'Sans date',
+        categorie: 'Test',
+        resume: 'Résumé',
+      })
+      .expect(400);
+    const ajout = await api('admin')
+      .post('/vitrine/gestion/actualites', {
+        titre: 'Journée portes ouvertes',
+        categorie: 'Événement',
+        resume: 'Visite des locaux et rencontre avec les enseignants.',
+        datePublication: '2026-12-05',
+        aLaUne: true,
+        lienLibelle: 'Je viens',
+        lien: '/enregistrements',
+      })
+      .expect(201);
+    const nouvelle = (ajout.body as Body[]).find(
+      (item) => item.titre === 'Journée portes ouvertes',
+    )!;
+    expect(nouvelle.image).toBeNull();
+    expect((ajout.body as Body[]).filter((item) => item.aLaUne)).toHaveLength(
+      1,
+    );
+    const publiques = await request(serveur)
+      .get('/vitrine/actualites')
+      .expect(200);
+    expect(publiques.body[0].titre).toBe('Journée portes ouvertes');
+
+    // Masquée, elle disparaît du site ; supprimée, de la liste.
+    await api('admin')
+      .patch(`/vitrine/gestion/actualites/${nouvelle.id}`, { actif: false })
+      .expect(200);
+    const sansElle = await request(serveur)
+      .get('/vitrine/actualites')
+      .expect(200);
+    expect(sansElle.body.some((item: Body) => item.id === nouvelle.id)).toBe(
+      false,
+    );
+    await api('admin')
+      .delete(`/vitrine/gestion/actualites/${nouvelle.id}`)
+      .expect(200);
+
+    // Questions : ajout, ordre complet exigé, masquage.
+    await api('admin')
+      .post('/vitrine/gestion/questions', { question: 'Sans réponse ?' })
+      .expect(400);
+    const liste = await api('admin')
+      .post('/vitrine/gestion/questions', {
+        question: 'Y a-t-il des cours du soir ?',
+        reponse: 'Renseignez-vous auprès du service d’information.',
+      })
+      .expect(201);
+    const ids = (liste.body as Body[]).map((item) => item.id as string);
+    expect(ids).toHaveLength(7);
+    await api('admin')
+      .post('/vitrine/gestion/questions/ordre', { ids: ids.slice(1) })
+      .expect(400);
+    const reordonnees = await api('admin')
+      .post('/vitrine/gestion/questions/ordre', {
+        ids: [ids[6], ...ids.slice(0, 6)],
+      })
+      .expect(201);
+    expect(reordonnees.body[0].question).toBe('Y a-t-il des cours du soir ?');
+    await api('admin')
+      .patch(`/vitrine/gestion/questions/${ids[6]}`, { actif: false })
+      .expect(200);
+    const visibles = await request(serveur)
+      .get('/vitrine/questions')
+      .expect(200);
+    expect(visibles.body).toHaveLength(6);
   });
 });

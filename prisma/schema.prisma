@@ -1758,6 +1758,43 @@ model DiapositiveVitrine {
   @@map("diapositives_vitrine")
 }
 
+// Actualité de la vitrine publique : une image, une catégorie, une date, un
+// titre, un résumé et, si besoin, un texte complet et un lien.
+model ActualiteVitrine {
+  id              String   @id @default(uuid())
+  categorie       String
+  titre           String
+  resume          String
+  contenu         String?
+  datePublication DateTime
+  imagePublicId   String?
+  imageUrl        String?
+  lienLibelle     String?
+  lien            String?
+  aLaUne          Boolean  @default(false)
+  actif           Boolean  @default(true)
+  creeParNom      String
+  creeLe          DateTime @default(now())
+  modifieLe       DateTime @updatedAt
+
+  @@index([actif, datePublication])
+  @@map("actualites_vitrine")
+}
+
+// Question fréquente de la vitrine publique.
+model QuestionVitrine {
+  id        String   @id @default(uuid())
+  question  String
+  reponse   String
+  ordre     Int      @default(0)
+  actif     Boolean  @default(true)
+  creeLe    DateTime @default(now())
+  modifieLe DateTime @updatedAt
+
+  @@index([actif, ordre])
+  @@map("questions_vitrine")
+}
+
 // Annonce de l'administration, lue par les étudiants dans leur espace.
 // Sans cible, elle s'adresse à tous ; sinon à une filière, un niveau ou une classe.
 model Annonce {

@@ -45,6 +45,25 @@ export class VitrinePubliqueController {
     const { contenu, type } = await this.vitrine.lireImage(id);
     return new StreamableFile(contenu, { type });
   }
+
+  @Get('actualites')
+  @Header('Cache-Control', 'public, max-age=60')
+  actualites() {
+    return this.vitrine.actualitesPubliques();
+  }
+
+  @Get('actualites/:id/image')
+  @Header('Cache-Control', 'public, max-age=604800, immutable')
+  async imageActualite(@Param('id') id: string) {
+    const { contenu, type } = await this.vitrine.lireImageActualite(id);
+    return new StreamableFile(contenu, { type });
+  }
+
+  @Get('questions')
+  @Header('Cache-Control', 'public, max-age=60')
+  questions() {
+    return this.vitrine.questionsPubliques();
+  }
 }
 
 // Gestion du carrousel par l'administration.
@@ -86,5 +105,62 @@ export class VitrineGestionController {
   @Post('ordre')
   ordonner(@Body() body: Corps) {
     return this.vitrine.ordonner(body ?? {});
+  }
+
+  // Actualités.
+  @Get('actualites')
+  actualites() {
+    return this.vitrine.actualites();
+  }
+
+  @Post('actualites')
+  @UseInterceptors(image())
+  creerActualite(
+    @Body() body: Corps,
+    @UploadedFile() fichier: FichierRecu | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.vitrine.creerActualite(body ?? {}, fichier, acteurDe(request));
+  }
+
+  @Patch('actualites/:id')
+  @UseInterceptors(image())
+  modifierActualite(
+    @Param('id') id: string,
+    @Body() body: Corps,
+    @UploadedFile() fichier: FichierRecu | undefined,
+  ) {
+    return this.vitrine.modifierActualite(id, body ?? {}, fichier);
+  }
+
+  @Delete('actualites/:id')
+  supprimerActualite(@Param('id') id: string) {
+    return this.vitrine.supprimerActualite(id);
+  }
+
+  // Questions fréquentes.
+  @Get('questions')
+  questions() {
+    return this.vitrine.questions();
+  }
+
+  @Post('questions')
+  creerQuestion(@Body() body: Corps) {
+    return this.vitrine.creerQuestion(body ?? {});
+  }
+
+  @Patch('questions/:id')
+  modifierQuestion(@Param('id') id: string, @Body() body: Corps) {
+    return this.vitrine.modifierQuestion(id, body ?? {});
+  }
+
+  @Delete('questions/:id')
+  supprimerQuestion(@Param('id') id: string) {
+    return this.vitrine.supprimerQuestion(id);
+  }
+
+  @Post('questions/ordre')
+  ordonnerQuestions(@Body() body: Corps) {
+    return this.vitrine.ordonnerQuestions(body ?? {});
   }
 }
