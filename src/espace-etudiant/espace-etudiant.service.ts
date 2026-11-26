@@ -12,6 +12,7 @@ import { DeliberationsService } from '../academique/deliberations.service';
 import { AnnoncesService } from '../annonces/annonces.service';
 import { StructureService } from '../academique/structure.service';
 import { CloudinaryService } from '../fichiers/cloudinary.service';
+import { tarifDe } from '../frais-scolarite/frais-scolarite.rules';
 import { situationScolarite } from '../frais-scolarite/frais-scolarite.situation';
 import { PrismaService } from '../prisma/prisma.service';
 import { JetonEtudiant } from './etudiant.guard';
@@ -497,23 +498,87 @@ export class EspaceEtudiantService {
 
   async scolarite(personneId: string) {
     const inscription = await this.exigerInscription(personneId);
-    const [situation, paiements] = await Promise.all([
-      situationScolarite(this.prisma, inscription.id),
-      this.prisma.paiement.findMany({
-        where: {
-          inscriptionId: inscription.id,
-          annulation: { is: null },
-          typePaiement: { not: 'ANNULATION' },
-        },
-        include: {
-          ligneScolarite: { select: { libelle: true } },
-          elementDossier: {
-            select: { elementRequis: { select: { nom: true } } },
+    const demandeBourseId = inscription.demandeBourseId;
+    const [situation, paiements, demande, tarifs, nombreMois] =
+      await Promise.all([
+        situationScolarite(this.prisma, inscription.id),
+        this.prisma.paiement.findMany({
+          where: {
+            // Le dossier de bourse a ses propres frais (dépôt) : ils comptent aussi.
+            OR: [
+              { inscriptionId: inscription.id },
+              ...(demandeBourseId ? [{ demandeBourseId }] : []),
+            ],
+            annulation: { is: null },
+            typePaiement: { not: 'ANNULATION' },
           },
-        },
-        orderBy: { datePaiement: 'desc' },
-      }),
-    ]);
+          include: {
+            ligneScolarite: { select: { libelle: true } },
+            elementDossier: {
+              select: { elementRequis: { select: { nom: true } } },
+            },
+          },
+          orderBy: { datePaiement: 'desc' },
+        }),
+        demandeBourseId
+          ? this.prisma.demandeBourse.findUnique({
+              where: { id: demandeBourseId },
+              select: {
+                statut: true,
+                typeBourse: {
+                  select: {
+                    nom: true,
+                    modeScolarite: true,
+                    tauxReduction: true,
+                  },
+                },
+                elementsDossier: {
+                  where: { montantAttendu: { not: null } },
+                  select: {
+                    id: true,
+                    montantAttendu: true,
+                    elementRequis: { select: { nom: true } },
+                    paiements: { select: { montant: true } },
+                  },
+                },
+              },
+            })
+          : null,
+        this.prisma.tarifScolarite.findMany(),
+        this.prisma.moisScolarite.count({
+          where: { anneeScolaire: inscription.anneeScolaire },
+        }),
+      ]);
+    // La bourse, telle qu'elle s'applique à l'échéancier (acceptée et pas retirée).
+    const bourse =
+      demande?.statut === 'ACCEPTEE' &&
+      demande.typeBourse &&
+      !inscription.bourseRetireeLe
+        ? demande.typeBourse
+        : null;
+    const tarifNormal = tarifDe(
+      tarifs.map((tarif) => ({
+        niveau: tarif.niveau,
+        filiereId: tarif.filiereId,
+        montantMensuel: Number(tarif.montantMensuel),
+      })),
+      inscription.niveau,
+      inscription.filiereId,
+    );
+    const fraisBourse = (demande?.elementsDossier ?? []).map((element) => {
+      const montantDu = Number(element.montantAttendu);
+      const paye = element.paiements.reduce(
+        (total, item) => total + Number(item.montant),
+        0,
+      );
+      return {
+        id: element.id,
+        libelle: `${element.elementRequis.nom} (dossier de bourse)`,
+        montant: montantDu,
+        paye,
+        reste: Math.max(0, montantDu - paye),
+      };
+    });
     const libelles: Record<string, string> = {
       FRAIS_DEPOT: 'Frais de dépôt',
       FRAIS_INSCRIPTION: "Frais d'inscription",
@@ -525,6 +590,23 @@ export class EspaceEtudiantService {
     };
     return {
       anneeScolaire: inscription.anneeScolaire,
+      // Ce que la bourse change pour l'étudiant, affiché en clair dans son espace.
+      bourse: bourse && {
+        nom: bourse.nom,
+        mode: bourse.modeScolarite,
+        taux:
+          inscription.reductionIndividuelle !== null
+            ? Number(inscription.reductionIndividuelle)
+            : bourse.tauxReduction === null
+              ? null
+              : Number(bourse.tauxReduction),
+      },
+      reductionIndividuelle:
+        inscription.reductionIndividuelle === null
+          ? null
+          : Number(inscription.reductionIndividuelle),
+      tarifNormal,
+      nombreMoisNormal: nombreMois,
       situation: situation && {
         regime: situation.regime,
         mensualites: situation.mensualites.map((ligne) => ({
@@ -552,9 +634,10 @@ export class EspaceEtudiantService {
         })),
         resteMensualites: situation.resteMensualites,
         resteAnnexes: situation.resteAnnexes,
+        fraisBourse,
         resteTotal:
           situation.resteTotal +
-          situation.fraisInscription.reduce(
+          [...situation.fraisInscription, ...fraisBourse].reduce(
             (total, ligne) => total + ligne.reste,
             0,
           ),
