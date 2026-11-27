@@ -7,6 +7,7 @@ import {
   joursCommuns,
   joursDeConge,
   RubriqueCalcul,
+  salaireFixeDuMois,
   tauxHoraireDuTarif,
 } from './rh.rules';
 
@@ -41,6 +42,61 @@ describe('règles RH et paie', () => {
     // Du lundi 5 au dimanche 11 octobre 2026 : six jours.
     expect(joursDeConge(jour('2026-10-05'), jour('2026-10-11'))).toBe(6);
     expect(joursDeConge(jour('2026-10-10'), jour('2026-10-10'))).toBe(1);
+  });
+
+  it('paie un montant fixe par mois de contrat, quel que soit le mois calendaire', () => {
+    const contrat = (
+      debut: string,
+      fin: string | null,
+      salaireBase: number,
+    ) => ({
+      dateDebut: jour(debut),
+      dateFin: fin ? jour(fin) : null,
+      salaireBase,
+    });
+    // Du 26 octobre au 25 novembre : un mois entier, payé en novembre.
+    const octNov = [contrat('2026-10-26', '2026-11-25', 70_000)];
+    expect(salaireFixeDuMois(octNov, 2026, 10)).toBe(0);
+    expect(salaireFixeDuMois(octNov, 2026, 11)).toBe(70_000);
+    expect(salaireFixeDuMois(octNov, 2026, 12)).toBe(0);
+    // « Du 25 au 25 » ou un jour de plus : toujours un seul mois.
+    expect(
+      salaireFixeDuMois(
+        [contrat('2026-10-25', '2026-11-25', 70_000)],
+        2026,
+        11,
+      ),
+    ).toBe(70_000);
+    expect(
+      salaireFixeDuMois(
+        [contrat('2026-10-26', '2026-11-26', 50_000)],
+        2026,
+        11,
+      ),
+    ).toBe(50_000);
+    // Renouvellement sans interruption : décembre payé en entier aussi.
+    const renouvele = [...octNov, contrat('2026-11-26', '2026-12-25', 70_000)];
+    expect(salaireFixeDuMois(renouvele, 2026, 11)).toBe(70_000);
+    expect(salaireFixeDuMois(renouvele, 2026, 12)).toBe(70_000);
+    // CDI commencé le 1er : chaque mois calendaire, salaire plein.
+    const cdi = [contrat('2020-01-01', null, 260_000)];
+    expect(salaireFixeDuMois(cdi, 2026, 2)).toBe(260_000);
+    expect(salaireFixeDuMois(cdi, 2026, 10)).toBe(260_000);
+    // Contrat arrêté en cours de mois : le dernier mois entamé au prorata.
+    expect(
+      salaireFixeDuMois(
+        [contrat('2026-09-01', '2026-10-15', 300_000)],
+        2026,
+        10,
+      ),
+    ).toBe(145_161.29);
+    // Avenant : l'ancien salaire jusqu'à la veille, le nouveau ensuite, même rythme.
+    const avenant = [
+      contrat('2026-01-01', '2026-10-15', 260_000),
+      contrat('2026-10-16', null, 300_000),
+    ];
+    expect(salaireFixeDuMois(avenant, 2026, 10)).toBe(280_645.16);
+    expect(salaireFixeDuMois(avenant, 2026, 11)).toBe(300_000);
   });
 
   it('calcule la part du mois couverte par un contrat', () => {

@@ -97,6 +97,106 @@ export function bornesDuMois(annee: number, mois: number) {
   };
 }
 
+// Même jour, n mois plus tard (le 31 janvier + 1 mois = le 28 ou 29 février).
+function plusMois(date: Date, n: number): Date {
+  const annee = date.getUTCFullYear();
+  const mois = date.getUTCMonth() + n;
+  const dernier = new Date(Date.UTC(annee, mois + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(annee, mois, Math.min(date.getUTCDate(), dernier)));
+}
+
+// Fin de contrat à un ou deux jours d'un mois rond (« du 25 octobre au
+// 25 novembre ») : ces jours restants ne font pas un mois de plus.
+const JOURS_DE_TOLERANCE = 2;
+
+type ContratSalaire = {
+  dateDebut: Date;
+  dateFin: Date | null;
+  salaireBase: number;
+};
+
+/**
+ * Salaire fixe dû dans la paie d'un mois. Chaque mois de contrat, compté depuis
+ * son premier jour (du 26 octobre au 25 novembre, par exemple), est payé en
+ * entier, sans tenir compte du nombre de jours du mois calendaire, dans la paie
+ * du mois où il se termine. Des contrats qui se suivent sans interruption
+ * (renouvellement, avenant) gardent le même rythme. Seul un dernier mois
+ * entamé, quand le contrat s'arrête en cours de mois, est payé au prorata.
+ */
+export function salaireFixeDuMois(
+  contrats: ContratSalaire[],
+  annee: number,
+  mois: number,
+): number {
+  const { debut, fin } = bornesDuMois(annee, mois);
+  const tries = [...contrats].sort(
+    (a, b) => a.dateDebut.getTime() - b.dateDebut.getTime(),
+  );
+  // Suites de contrats sans interruption : le lendemain de la fin de l'un, l'autre commence.
+  const suites: ContratSalaire[][] = [];
+  for (const contrat of tries) {
+    const suite = suites.at(-1);
+    const dernier = suite?.at(-1);
+    const continu =
+      dernier &&
+      (dernier.dateFin === null ||
+        jourUTC(contrat.dateDebut) <= jourUTC(dernier.dateFin) + JOUR_MS);
+    if (suite && continu) suite.push(contrat);
+    else suites.push([contrat]);
+  }
+  let montant = 0;
+  for (const suite of suites) {
+    const depart = suite[0].dateDebut;
+    const arret = suite.reduce<Date | null>(
+      (plusTard, contrat) =>
+        contrat.dateFin === null || plusTard === null
+          ? null
+          : contrat.dateFin > plusTard
+            ? contrat.dateFin
+            : plusTard,
+      suite[0].dateFin,
+    );
+    for (let k = 0; ; k += 1) {
+      const cycleDebut = plusMois(depart, k);
+      if (cycleDebut > fin) break;
+      if (arret && jourUTC(cycleDebut) > jourUTC(arret)) break;
+      const cycleFin = new Date(jourUTC(plusMois(depart, k + 1)) - JOUR_MS);
+      const tronque = arret !== null && jourUTC(arret) < jourUTC(cycleFin);
+      const finEffective = tronque ? arret : cycleFin;
+      // Payé dans la paie du mois où ce mois de contrat se termine.
+      if (
+        jourUTC(finEffective) < jourUTC(debut) ||
+        jourUTC(finEffective) > jourUTC(fin)
+      )
+        continue;
+      const joursCycle = joursCommuns(
+        cycleDebut,
+        cycleFin,
+        cycleDebut,
+        cycleFin,
+      );
+      if (
+        tronque &&
+        k > 0 &&
+        joursCommuns(cycleDebut, finEffective, cycleDebut, finEffective) <=
+          JOURS_DE_TOLERANCE
+      )
+        continue;
+      for (const contrat of suite)
+        montant +=
+          (contrat.salaireBase *
+            joursCommuns(
+              contrat.dateDebut,
+              contrat.dateFin,
+              cycleDebut,
+              finEffective,
+            )) /
+          joursCycle;
+    }
+  }
+  return Math.round(montant * 100) / 100;
+}
+
 // Congés annuels acquis depuis le début de l'année (ou l'embauche) : un douzième par mois entamé.
 export function congesAcquis(
   dateEmbauche: Date,

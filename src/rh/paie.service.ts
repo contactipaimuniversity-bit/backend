@@ -24,7 +24,7 @@ import {
   CATEGORIES_EMPLOYE,
   calculerBulletin,
   echeanceDue,
-  joursCommuns,
+  salaireFixeDuMois,
   joursDeConge,
   MODES_PAIEMENT,
   MODES_RUBRIQUE,
@@ -407,19 +407,17 @@ export class PaieService {
         (item) => !item.dateFin || item.dateFin >= mois.debut,
       );
       if (!contrats.length) continue;
-      // Salaire au prorata des jours couverts par chaque contrat du mois.
-      let salaire = 0;
-      let joursCouverts = 0;
-      for (const contrat of contrats) {
-        const jours = joursCommuns(
-          contrat.dateDebut,
-          contrat.dateFin,
-          mois.debut,
-          mois.fin,
-        );
-        salaire += (Number(contrat.salaireBase) * jours) / mois.jours;
-        joursCouverts += jours;
-      }
+      // Salaire fixe : chaque mois de contrat (du jour de début au même jour le
+      // mois suivant) est payé en entier, dans la paie du mois où il se termine.
+      const salaire = salaireFixeDuMois(
+        employe.contrats.map((item) => ({
+          dateDebut: item.dateDebut,
+          dateFin: item.dateFin,
+          salaireBase: Number(item.salaireBase),
+        })),
+        periode.annee,
+        periode.mois,
+      );
       const contrat = contrats[0];
       // Les heures ne sont versées qu'à l'échéance du contrat, ou plus tôt si
       // la RH l'a demandé pour cette paie. Chaque séance est payée au tarif du
@@ -489,9 +487,11 @@ export class PaieService {
         number
       >;
       const calcul = calculerBulletin({
-        salaireBase:
-          joursCouverts > 0 ? (salaire * mois.jours) / joursCouverts : 0,
-        prorata: Math.min(1, joursCouverts / mois.jours),
+        salaireBase: Number(contrat.salaireBase),
+        prorata:
+          Number(contrat.salaireBase) > 0
+            ? salaire / Number(contrat.salaireBase)
+            : 0,
         tauxHoraire,
         heuresVacation,
         joursAbsence,
