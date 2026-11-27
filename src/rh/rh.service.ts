@@ -228,7 +228,10 @@ export class RhService {
       data.utilisateurId = utilisateurId;
     }
     try {
-      return await this.prisma.employe.update({ where: { id }, data });
+      await this.prisma.employe.update({ where: { id }, data });
+      // La fiche complète (contrats, congés, absences…), comme les autres actions :
+      // l'écran la réaffiche telle quelle après l'enregistrement.
+      return await this.employe(id);
     } catch (error) {
       if (isUniqueConstraintViolation(error))
         throw new ConflictException(
