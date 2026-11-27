@@ -16,6 +16,7 @@ const INTERVALLE_MS = 5 * 60 * 1000;
 const DUREE_VIE_S = 3 * 24 * 60 * 60;
 
 type Cible = {
+  personneId?: string | null;
   filiereId: string | null;
   niveau: string | null;
   classeId: string | null;
@@ -210,6 +211,7 @@ export class NotificationsPushService implements OnModuleInit, OnModuleDestroy {
       include: {
         compte: {
           select: {
+            personneId: true,
             personne: {
               select: {
                 inscriptions: {
@@ -229,6 +231,11 @@ export class NotificationsPushService implements OnModuleInit, OnModuleDestroy {
         },
       },
     });
+    // Annonce personnelle : seuls les téléphones de cet étudiant.
+    if (cible.personneId)
+      return abonnements.filter(
+        (abonnement) => abonnement.compte.personneId === cible.personneId,
+      );
     const ciblee = cible.filiereId || cible.niveau || cible.classeId;
     return abonnements.filter((abonnement) => {
       if (!ciblee) return true;

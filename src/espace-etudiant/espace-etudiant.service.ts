@@ -407,6 +407,7 @@ export class EspaceEtudiantService {
   async annoncesPour(personneId: string) {
     const inscription = await this.inscriptionCourante(personneId);
     return this.annonces.pourEtudiant(
+      personneId,
       inscription && {
         filiereId:
           inscription.filiereId ?? inscription.classe?.filiereId ?? null,

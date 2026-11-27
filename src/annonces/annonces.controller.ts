@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -25,6 +26,11 @@ export class AnnoncesController {
   @Get()
   liste() {
     return this.annonces.liste();
+  }
+
+  @Get('etudiants')
+  etudiants(@Query('q') q?: string) {
+    return this.annonces.etudiants(q);
   }
 
   @Get('cibles')

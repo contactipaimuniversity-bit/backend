@@ -36,7 +36,11 @@ export class AnnoncesService {
     private readonly push: NotificationsPushService,
   ) {}
 
-  private async donnees(body: Body, partiel: boolean) {
+  private async donnees(rawBody: Body, partiel: boolean) {
+    // Un étudiant précis prime : filière, niveau et classe sont alors ignorés.
+    const body: Body = optionnel(rawBody.personneId)
+      ? { ...rawBody, filiereId: null, niveau: null, classeId: null }
+      : rawBody;
     const data: Record<string, unknown> = {};
     if (!partiel || body.titre !== undefined) {
       const titre = texte(body.titre);
@@ -86,6 +90,21 @@ export class AnnoncesService {
         throw new BadRequestException('Classe introuvable');
       data.classeId = classeId;
     }
+    if (!partiel || body.personneId !== undefined) {
+      const personneId = optionnel(body.personneId);
+      if (
+        personneId &&
+        !(await this.prisma.personne.count({ where: { id: personneId } }))
+      )
+        throw new BadRequestException('Étudiant introuvable');
+      data.personneId = personneId;
+      // Pour un étudiant précis, les autres cibles n'ont plus de sens.
+      if (personneId) {
+        data.filiereId = null;
+        data.niveau = null;
+        data.classeId = null;
+      }
+    }
     if (!partiel || body.publieeLe !== undefined)
       data.publieeLe =
         dateOuNull(body.publieeLe, 'La date de publication') ?? new Date();
@@ -102,9 +121,13 @@ export class AnnoncesService {
 
   // Noms lisibles des cibles (filière, classe), pour la liste de l'administration.
   private async avecCibles<
-    T extends { filiereId: string | null; classeId: string | null },
+    T extends {
+      filiereId: string | null;
+      classeId: string | null;
+      personneId: string | null;
+    },
   >(annonces: T[]) {
-    const [filieres, classes] = await Promise.all([
+    const [filieres, classes, etudiants] = await Promise.all([
       this.prisma.filiere.findMany({
         where: {
           id: {
@@ -124,11 +147,23 @@ export class AnnoncesService {
           filiere: { select: { code: true } },
         },
       }),
+      this.prisma.personne.findMany({
+        where: {
+          id: {
+            in: annonces.flatMap((a) => (a.personneId ? [a.personneId] : [])),
+          },
+        },
+        select: { id: true, nom: true, prenom: true, matricule: true },
+      }),
     ]);
     return annonces.map((annonce) => {
       const classe = classes.find((item) => item.id === annonce.classeId);
+      const etudiant = etudiants.find((item) => item.id === annonce.personneId);
       return {
         ...annonce,
+        etudiant: etudiant
+          ? `${etudiant.nom} ${etudiant.prenom}${etudiant.matricule ? ` (${etudiant.matricule})` : ''}`
+          : null,
         filiere:
           filieres.find((item) => item.id === annonce.filiereId)?.nom ?? null,
         classe: classe
@@ -143,6 +178,61 @@ export class AnnoncesService {
       orderBy: [{ epinglee: 'desc' }, { publieeLe: 'desc' }],
     });
     return this.avecCibles(annonces);
+  }
+
+  // Recherche d'un étudiant à qui adresser une annonce personnelle : il doit
+  // avoir un matricule ; on indique s'il a activé son espace et ses notifications.
+  async etudiants(rawQ: unknown) {
+    const q = texte(rawQ);
+    if (q.length < 2) return [];
+    const mots = q.split(/\s+/).filter(Boolean).slice(0, 4);
+    const personnes = await this.prisma.personne.findMany({
+      where: {
+        matricule: { not: null },
+        AND: mots.map((mot) => ({
+          OR: [
+            { nom: { contains: mot, mode: 'insensitive' as const } },
+            { prenom: { contains: mot, mode: 'insensitive' as const } },
+            { matricule: { contains: mot, mode: 'insensitive' as const } },
+          ],
+        })),
+      },
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        matricule: true,
+        inscriptions: {
+          where: { statut: { not: 'ABANDONNEE' } },
+          orderBy: { dateInscription: 'desc' },
+          take: 1,
+          select: { filiere: true, niveau: true },
+        },
+        compteEtudiant: {
+          select: {
+            motDePasse: true,
+            desactiveLe: true,
+            _count: { select: { abonnementsPush: true } },
+          },
+        },
+      },
+      orderBy: [{ nom: 'asc' }, { prenom: 'asc' }],
+      take: 15,
+    });
+    return personnes.map((personne) => {
+      const compte = personne.compteEtudiant;
+      const actif = Boolean(compte?.motDePasse && !compte.desactiveLe);
+      return {
+        id: personne.id,
+        nom: `${personne.nom} ${personne.prenom}`,
+        matricule: personne.matricule,
+        detail: personne.inscriptions[0]
+          ? `${personne.inscriptions[0].filiere} · ${personne.inscriptions[0].niveau}`
+          : null,
+        espaceActif: actif,
+        notifications: actif && (compte?._count.abonnementsPush ?? 0) > 0,
+      };
+    });
   }
 
   // Choix proposés dans le formulaire : filières actives, niveaux, classes de l'année en cours.
@@ -222,6 +312,7 @@ export class AnnoncesService {
   // Ce que voit un étudiant : les annonces publiées, pas expirées, qui
   // s'adressent à tous ou à sa filière, son niveau ou sa classe.
   async pourEtudiant(
+    personneId: string,
     inscription: {
       filiereId: string | null;
       niveau: string;
@@ -234,23 +325,33 @@ export class AnnoncesService {
     const annonces = await this.prisma.annonce.findMany({
       where: {
         publieeLe: { lte: maintenant },
-        OR: [{ expireLe: null }, { expireLe: { gt: maintenant } }],
         AND: [
+          { OR: [{ expireLe: null }, { expireLe: { gt: maintenant } }] },
           {
             OR: [
-              { filiereId: null },
-              ...(inscription?.filiereId
-                ? [{ filiereId: inscription.filiereId }]
-                : []),
-            ],
-          },
-          { OR: [{ niveau: null }, ...(niveau ? [{ niveau }] : [])] },
-          {
-            OR: [
-              { classeId: null },
-              ...(inscription?.classeId
-                ? [{ classeId: inscription.classeId }]
-                : []),
+              { personneId },
+              {
+                personneId: null,
+                AND: [
+                  {
+                    OR: [
+                      { filiereId: null },
+                      ...(inscription?.filiereId
+                        ? [{ filiereId: inscription.filiereId }]
+                        : []),
+                    ],
+                  },
+                  { OR: [{ niveau: null }, ...(niveau ? [{ niveau }] : [])] },
+                  {
+                    OR: [
+                      { classeId: null },
+                      ...(inscription?.classeId
+                        ? [{ classeId: inscription.classeId }]
+                        : []),
+                    ],
+                  },
+                ],
+              },
             ],
           },
         ],
@@ -267,6 +368,7 @@ export class AnnoncesService {
       publieeLe: annonce.publieeLe,
       modifieLe: annonce.modifieLe,
       auteur: annonce.creeParNom,
+      personnelle: annonce.personneId !== null,
     }));
   }
 }

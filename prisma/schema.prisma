@@ -1807,6 +1807,8 @@ model Annonce {
   filiereId   String?
   niveau      String?
   classeId    String?
+  // Annonce adressée à un seul étudiant (les autres cibles sont alors ignorées).
+  personneId  String?
   publieeLe   DateTime  @default(now())
   // Après cette date, l'annonce n'est plus montrée.
   expireLe    DateTime?
@@ -1818,6 +1820,7 @@ model Annonce {
   notifieeLe  DateTime?
 
   @@index([publieeLe])
+  @@index([personneId])
   @@map("annonces")
 }
 
