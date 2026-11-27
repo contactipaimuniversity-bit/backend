@@ -106,13 +106,26 @@ export class EspaceEtudiantService {
       throw new BadRequestException(
         "Cet étudiant n'a pas encore de matricule : il en reçoit un dès que ses frais d'inscription sont payés.",
       );
+    const { brut, compte } = await this.emettreCode(personneId, parNom);
+    return {
+      ...this.resumeCompte(personne.matricule, compte),
+      etudiant: nomComplet(personne),
+      // Montré une seule fois : seul son empreinte est conservée.
+      codeActivation: `${brut.slice(0, 4)}-${brut.slice(4)}`,
+    };
+  }
+
+  // Nouveau code d'activation (haché en base) ; remplace un code précédent.
+  private async emettreCode(
+    personneId: string,
+    parNom: string,
+    dureeJours = DUREE_CODE_JOURS,
+  ) {
     const brut = Array.from(
       { length: 8 },
       () => ALPHABET_CODE[randomInt(ALPHABET_CODE.length)],
     ).join('');
-    const expireLe = new Date(
-      Date.now() + DUREE_CODE_JOURS * 24 * 60 * 60 * 1000,
-    );
+    const expireLe = new Date(Date.now() + dureeJours * 24 * 60 * 60 * 1000);
     const donnees = {
       codeActivation: await bcrypt.hash(brut, 10),
       codeExpireLe: expireLe,
@@ -127,12 +140,218 @@ export class EspaceEtudiantService {
       create: { personneId, ...donnees },
       update: donnees,
     });
+    return { brut, compte };
+  }
+
+  // ---------- Accès en série (fiches imprimées) ----------
+
+  // Choix proposés : filières, niveaux et classes de l'année en cours.
+  async filtresAcces() {
+    const [poles, filieres, niveaux, classes] = await Promise.all([
+      this.prisma.pole.findMany({
+        where: { actif: true },
+        select: { id: true, nom: true },
+        orderBy: [{ ordre: 'asc' }, { nom: 'asc' }],
+      }),
+      this.prisma.filiere.findMany({
+        where: { actif: true },
+        select: { id: true, nom: true, poleId: true },
+        orderBy: { nom: 'asc' },
+      }),
+      this.prisma.niveau.findMany({
+        where: { actif: true },
+        select: { code: true, libelle: true },
+        orderBy: [{ cycle: 'asc' }, { rang: 'asc' }],
+      }),
+      this.prisma.classe.findMany({
+        where: { anneeAcademique: { statut: { not: 'CLOTUREE' } } },
+        select: {
+          id: true,
+          niveau: true,
+          groupe: true,
+          filiere: { select: { code: true, poleId: true } },
+        },
+        orderBy: [{ niveau: 'asc' }, { groupe: 'asc' }],
+      }),
+    ]);
     return {
-      ...this.resumeCompte(personne.matricule, compte),
-      etudiant: nomComplet(personne),
-      // Montré une seule fois : seul son empreinte est conservée.
-      codeActivation: `${brut.slice(0, 4)}-${brut.slice(4)}`,
+      poles,
+      filieres,
+      niveaux,
+      classes: classes.map((classe) => ({
+        id: classe.id,
+        nom: `${classe.filiere.code} ${classe.niveau} ${classe.groupe}`,
+        poleId: classe.filiere.poleId,
+      })),
     };
+  }
+
+  // Étudiants avec matricule et inscription en cours, et l'état de leur accès.
+  async listeAcces(query: Record<string, unknown>) {
+    const filiereId = texte(query.filiereId);
+    const niveau = texte(query.niveau);
+    const classeId = texte(query.classeId);
+    const poleId = texte(query.poleId);
+    const personnes = await this.prisma.personne.findMany({
+      where: {
+        matricule: { not: null },
+        inscriptions: {
+          some: {
+            statut: { not: 'ABANDONNEE' },
+            ...(poleId
+              ? {
+                  OR: [
+                    { filiereRef: { poleId } },
+                    { classe: { filiere: { poleId } } },
+                  ],
+                }
+              : {}),
+            ...(filiereId ? { filiereId } : {}),
+            ...(niveau ? { niveau } : {}),
+            ...(classeId ? { classeId } : {}),
+          },
+        },
+      },
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        matricule: true,
+        compteEtudiant: true,
+        inscriptions: {
+          where: { statut: { not: 'ABANDONNEE' } },
+          orderBy: { dateInscription: 'desc' },
+          take: 1,
+          select: {
+            filiere: true,
+            niveau: true,
+            filiereRef: { select: { nom: true } },
+            classe: {
+              select: {
+                niveau: true,
+                groupe: true,
+                filiere: { select: { code: true } },
+              },
+            },
+          },
+        },
+      },
+      orderBy: [{ nom: 'asc' }, { prenom: 'asc' }],
+    });
+    return personnes.map((personne) => {
+      const inscription = personne.inscriptions[0];
+      const classe = inscription?.classe;
+      return {
+        personneId: personne.id,
+        nom: personne.nom,
+        prenom: personne.prenom,
+        filiere: inscription?.filiereRef?.nom ?? inscription?.filiere ?? null,
+        niveau: classe?.niveau ?? inscription?.niveau ?? null,
+        classe: classe
+          ? `${classe.filiere.code} ${classe.niveau} ${classe.groupe}`
+          : null,
+        // Contient aussi le matricule.
+        ...this.resumeCompte(personne.matricule, personne.compteEtudiant),
+      };
+    });
+  }
+
+  // Codes pour toute une liste : les comptes déjà actifs ne sont jamais touchés.
+  async codesEnSerie(body: Body, parNom: string) {
+    const ids = Array.isArray(body.personneIds)
+      ? [
+          ...new Set(
+            body.personneIds.filter(
+              (id): id is string => typeof id === 'string',
+            ),
+          ),
+        ]
+      : [];
+    if (!ids.length)
+      throw new BadRequestException('Choisissez au moins un étudiant');
+    if (ids.length > 500)
+      throw new BadRequestException('500 étudiants au plus à la fois');
+    const duree = Number(body.dureeJours);
+    const dureeJours =
+      Number.isInteger(duree) && duree >= 1 && duree <= 120
+        ? duree
+        : DUREE_CODE_JOURS;
+    // Par défaut, un code encore valable n'est jamais remplacé : la fiche déjà
+    // remise reste bonne. Le remplacer doit être demandé explicitement.
+    const remplacer = body.remplacerCodesEnCours === true;
+    const personnes = await this.prisma.personne.findMany({
+      where: { id: { in: ids }, matricule: { not: null } },
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        matricule: true,
+        compteEtudiant: {
+          select: {
+            motDePasse: true,
+            desactiveLe: true,
+            codeActivation: true,
+            codeExpireLe: true,
+          },
+        },
+        inscriptions: {
+          where: { statut: { not: 'ABANDONNEE' } },
+          orderBy: { dateInscription: 'desc' },
+          take: 1,
+          select: {
+            filiere: true,
+            niveau: true,
+            filiereRef: { select: { nom: true } },
+            classe: {
+              select: {
+                niveau: true,
+                groupe: true,
+                filiere: { select: { code: true } },
+              },
+            },
+          },
+        },
+      },
+      orderBy: [{ nom: 'asc' }, { prenom: 'asc' }],
+    });
+    const fiches: Array<Record<string, unknown>> = [];
+    const ignores: string[] = [];
+    const codesConserves: string[] = [];
+    const maintenant = new Date();
+    for (const personne of personnes) {
+      const compte = personne.compteEtudiant;
+      const actif = compte?.motDePasse && !compte.desactiveLe;
+      if (actif) {
+        ignores.push(nomComplet(personne));
+        continue;
+      }
+      const codeValable =
+        compte?.codeActivation &&
+        compte.codeExpireLe &&
+        compte.codeExpireLe > maintenant;
+      if (codeValable && !remplacer) {
+        codesConserves.push(nomComplet(personne));
+        continue;
+      }
+      const emis = await this.emettreCode(personne.id, parNom, dureeJours);
+      const brut = emis.brut;
+      const inscription = personne.inscriptions[0];
+      const classe = inscription?.classe;
+      fiches.push({
+        personneId: personne.id,
+        nom: personne.nom,
+        prenom: personne.prenom,
+        matricule: personne.matricule,
+        filiere: inscription?.filiereRef?.nom ?? inscription?.filiere ?? null,
+        niveau: classe?.niveau ?? inscription?.niveau ?? null,
+        classe: classe
+          ? `${classe.filiere.code} ${classe.niveau} ${classe.groupe}`
+          : null,
+        codeActivation: `${brut.slice(0, 4)}-${brut.slice(4)}`,
+        codeExpireLe: emis.compte.codeExpireLe,
+      });
+    }
+    return { fiches, ignores, codesConserves };
   }
 
   // Compte fermé : les sessions ouvertes tombent et le mot de passe est effacé.

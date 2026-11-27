@@ -6,6 +6,7 @@ import {
   HttpCode,
   Param,
   Post,
+  Query,
   Req,
   StreamableFile,
   UseGuards,
@@ -164,6 +165,23 @@ export class EtudiantController {
 @UseGuards(JwtAuthGuard)
 export class ComptesEtudiantsController {
   constructor(private readonly service: EspaceEtudiantService) {}
+
+  // Accès en série : liste des étudiants et de leur accès, puis codes à imprimer.
+  @Get()
+  liste(@Query() query: Record<string, unknown>) {
+    return this.service.listeAcces(query);
+  }
+
+  @Get('filtres')
+  filtres() {
+    return this.service.filtresAcces();
+  }
+
+  @Post('codes')
+  @HttpCode(200)
+  codes(@Body() body: Corps, @Req() request: AuthenticatedRequest) {
+    return this.service.codesEnSerie(body, acteurDe(request).nom);
+  }
 
   @Get(':personneId')
   statut(@Param('personneId') personneId: string) {
