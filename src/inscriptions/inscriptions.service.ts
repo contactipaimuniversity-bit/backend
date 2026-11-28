@@ -140,6 +140,7 @@ export class InscriptionsService {
                 prenom: prenomNouvellePersonne!,
                 telephone: this.optionalString(nouvellePersonne.telephone),
                 quartier: this.optionalString(nouvellePersonne.quartier),
+                ville: this.optionalString(nouvellePersonne.ville),
                 dateNaissance: this.optionalDate(
                   nouvellePersonne.dateNaissance,
                   'dateNaissance',

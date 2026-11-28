@@ -3,6 +3,7 @@ export class CreatePersonneDto {
   prenom!: string;
   telephone?: string;
   quartier?: string;
+  ville?: string;
   dateNaissance?: string;
   lieuNaissance?: string;
   sexe?: string | null;

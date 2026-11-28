@@ -215,6 +215,8 @@ model Personne {
   prenom             String
   telephone          String?
   quartier           String?
+  // Ville de résidence (le quartier précise où dans la ville).
+  ville              String?
   dateNaissance      DateTime?
   lieuNaissance      String?
   tuteurNom          String?

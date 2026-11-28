@@ -38,6 +38,7 @@ export class PersonnesService {
         prenom,
         telephone: this.optionalString(createDto.telephone),
         quartier: this.optionalString(createDto.quartier),
+        ville: this.optionalString(createDto.ville),
         dateNaissance: this.optionalDate(
           createDto.dateNaissance,
           'dateNaissance',
@@ -77,6 +78,7 @@ export class PersonnesService {
       where.OR = [
         { id: { in: await personnesCorrespondantes(this.prisma, query) } },
         { quartier: { contains: query, mode: 'insensitive' } },
+        { ville: { contains: query, mode: 'insensitive' } },
       ];
     }
     if (telephone) {
@@ -164,6 +166,9 @@ export class PersonnesService {
     }
     if (updateDto.quartier !== undefined) {
       data.quartier = this.optionalString(updateDto.quartier);
+    }
+    if (updateDto.ville !== undefined) {
+      data.ville = this.optionalString(updateDto.ville);
     }
     if (updateDto.dateNaissance !== undefined) {
       data.dateNaissance = this.optionalDate(
@@ -387,6 +392,7 @@ export class PersonnesService {
         prenom: true,
         telephone: true,
         quartier: true,
+        ville: true,
         dateNaissance: true,
         lieuNaissance: true,
         sexe: true,
@@ -421,6 +427,7 @@ export class PersonnesService {
         prenom: personne.prenom,
         telephone: personne.telephone,
         quartier: personne.quartier,
+        ville: personne.ville,
         dateNaissance: personne.dateNaissance,
         lieuNaissance: personne.lieuNaissance,
         tuteurNom: personne.tuteurNom,
@@ -479,6 +486,7 @@ export class PersonnesService {
         telephone: true,
         matricule: true,
         quartier: true,
+        ville: true,
       },
       orderBy: { dateEnregistrement: 'desc' },
       take: 20,
@@ -547,6 +555,7 @@ export class PersonnesService {
       prenom: true,
       telephone: true,
       quartier: true,
+      ville: true,
       dateNaissance: true,
       lieuNaissance: true,
       sexe: true,

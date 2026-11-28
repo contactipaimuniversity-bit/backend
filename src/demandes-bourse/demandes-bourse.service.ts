@@ -128,6 +128,7 @@ export class DemandesBourseService {
                 prenom: prenomNouvellePersonne!,
                 telephone: this.optionalString(nouvellePersonne.telephone),
                 quartier: this.optionalString(nouvellePersonne.quartier),
+                ville: this.optionalString(nouvellePersonne.ville),
                 dateNaissance: this.optionalDate(
                   nouvellePersonne.dateNaissance,
                   'dateNaissance',
@@ -279,6 +280,7 @@ export class DemandesBourseService {
             telephone: true,
             matricule: true,
             quartier: true,
+            ville: true,
             tuteurTelephone: true,
           },
         },
@@ -328,6 +330,7 @@ export class DemandesBourseService {
             prenom: true,
             telephone: true,
             quartier: true,
+            ville: true,
             dateNaissance: true,
             lieuNaissance: true,
             tuteurNom: true,
